@@ -6,11 +6,9 @@
 import logging
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
-import asyncio
 
 # استيراد المكتبات المطلوبة من moviebox-api
 from moviebox_api.v3.core import DownloadableVideoFilesDetail
-from moviebox_api.v3.http_client import MovieBoxHttpClient
 
 # إعداد logging
 logging.basicConfig(level=logging.INFO)
@@ -35,8 +33,8 @@ async def startup_event():
 
 @app.get("/get_download_links")
 async def get_download_links(
-    subject_id: str = Query(..., description="معرف الفيلم/المسلسل من MovieBox"),
-    resolution: int = Query(None, description="جودة الفيديو المطلوبة (مثلاً: 1080، 720، 480)")
+    subject_id: str = Query(..., description="معرف الفيلم/المسلسل"),
+    resolution: int = Query(1080, description="دقة الفيديو")  # جعل 1080 افتراضية لتسهيل التجربة
 ):
     """
     نقطة نهاية للحصول على روابط التحميل
@@ -45,8 +43,8 @@ async def get_download_links(
     -----------
     subject_id : str
         معرف الفيلم أو المسلسل (subject_id) من موقع MovieBox
-    resolution : int, optional
-        جودة الفيديو المطلوبة. إذا لم تحدد، سيتم إرجاع جميع الجودات المتاحة
+    resolution : int
+        دقة الفيديو المطلوبة (الافتراضية: 1080)
     
     Returns:
     --------
@@ -58,7 +56,7 @@ async def get_download_links(
     """
     
     try:
-        # تحقق من أن subject_id ليس فارغاً
+        # التحقق من أن subject_id ليس فارغاً
         if not subject_id or not subject_id.strip():
             raise HTTPException(
                 status_code=400,
@@ -67,45 +65,34 @@ async def get_download_links(
         
         logger.info(f"📥 طلب جديد: subject_id={subject_id}, resolution={resolution}")
         
-        # استخدام MovieBoxHttpClient مع async with
-        async with MovieBoxHttpClient() as client:
-            # إنشاء كائن DownloadableVideoFilesDetail
-            # هذا الكائن يقوم بجلب تفاصيل الملفات القابلة للتحميل
-            dl = DownloadableVideoFilesDetail(
-                client=client,
-                resolution=resolution
-            )
-            
-            # جلب محتوى التحميل من MovieBox
+        # 1. إنشاء الكائن الذي يبحث عن روابط التحميل مع ضبط الدقة
+        dl = DownloadableVideoFilesDetail(
+            resolution=resolution
+        )
+        
+        # 2. تشغيل الجلب داخل بيئة async
+        async with dl as dl_session:
+            # 3. جلب البيانات الحقيقية - هذه الدالة هي كل شيء!
+            #    تقوم بتسجيل الدخول تلقائياً، جلب الروابط، وحل التحديات الأمنية.
+            #    ترجع قائمة من كائنات VideoFileMetadata
             logger.info(f"⏳ جاري جلب البيانات من MovieBox...")
-            content = await dl.get_content(subject_id)
+            video_files = await dl_session.fetch(subject_id)
             
-            # تحويل النتيجة إلى قائمة من dictionaries
-            # نستخرج المعلومات المهمة من كل ملف
+            # 4. تحويل النتيجة إلى JSON
             download_links = []
-            
-            if content:
-                # التعامل مع النتيجة (قد تكون قائمة أو كائن واحد)
-                items = content if isinstance(content, list) else [content]
-                
-                for item in items:
-                    try:
-                        # استخراج البيانات من كل عنصر
-                        link_data = {
-                            "url": str(item.get("url", "") if isinstance(item, dict) else getattr(item, "url", "")),
-                            "resolution": item.get("resolution", None) if isinstance(item, dict) else getattr(item, "resolution", None),
-                            "size": item.get("size", None) if isinstance(item, dict) else getattr(item, "size", None),
-                            "quality": item.get("quality", None) if isinstance(item, dict) else getattr(item, "quality", None),
-                        }
-                        
-                        # تجاهل الروابط الفارغة
-                        if link_data["url"]:
-                            download_links.append(link_data)
-                    except Exception as item_error:
-                        logger.warning(f"⚠️  خطأ في معالجة عنصر: {item_error}")
-                        continue
+            for video in video_files:
+                # تحويل الكائن إلى dict باستخدام دالة model_dump() المدمجة
+                video_dict = video.model_dump()
+                download_links.append({
+                    "url": video_dict.get("resource_link"),
+                    "resolution": video_dict.get("resolution"),
+                    "size": video_dict.get("size"),
+                    "season": video_dict.get("se"),
+                    "episode": video_dict.get("ep"),
+                })
             
             if not download_links:
+                logger.warning(f"⚠️ لم يتم العثور على روابط لـ subject_id: {subject_id}")
                 raise HTTPException(
                     status_code=404,
                     detail=f"❌ لم يتم العثور على روابط تحميل لـ subject_id: {subject_id}"
