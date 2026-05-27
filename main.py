@@ -1,6 +1,6 @@
 """
 تطبيق FastAPI بسيط للحصول على روابط التحميل من مكتبة moviebox-api
-هذا التطبيق جاهز للنشر على Vercel
+تم التصحيح لجلب كافة الجودات والحلقات للمسلسلات بشكل صحيح
 """
 
 import logging
@@ -32,36 +32,58 @@ async def get_download_links(
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
 
-    # ✅ تحويل الجودة من رقم إلى ResolutionType
+    # تجهيز قيمة الجودة
     if resolution is not None:
         try:
-            # نبحث عن الجودة المناسبة بناءً على الرقم المدخل
             res_enum = ResolutionType(resolution)
         except ValueError:
-            # إذا لم يجد الجودة (مثلاً 0)، نستخدم UNSPECIFIED (كل الجودات)
             res_enum = ResolutionType.UNSPECIFIED
     else:
-        # إذا لم يرسل المستخدم جودة، نجلب كل الجودات
         res_enum = ResolutionType.UNSPECIFIED
 
     try:
         async with MovieBoxHttpClient() as client:
             dl = DownloadableVideoFilesDetail(
                 client_session=client,
-                resolution=res_enum  # ✅ الآن كائن ResolutionType
+                resolution=res_enum
             )
-            data = await dl.get_content(subject_id)
+            
+            all_items = []
+            # 🚀 السر هنا: نستخدم get_content_model_all لجلب كل الصفحات والجودات
+            async for content_model in dl.get_content_model_all(subject_id):
+                # نصل إلى البيانات الخام من داخل الـ model
+                if hasattr(content_model, 'list'):
+                    all_items.extend(content_model.list)
+                elif hasattr(content_model, 'items'):
+                    all_items.extend(content_model.items)
+                elif isinstance(content_model, dict):
+                    items = content_model.get("list", [])
+                    all_items.extend(items)
 
-        items = data.get("list", [])
         download_links = []
-        for item in items:
-            download_links.append({
-                "url": item.get("resourceLink"),
-                "resolution": item.get("resolution"),
-                "size": item.get("size"),
-                "season": item.get("se"),
-                "episode": item.get("ep"),
-            })
+        for item in all_items:
+            # التعامل مع item سواء كان dict أو object
+            if isinstance(item, dict):
+                url = item.get("resourceLink")
+                resolution_val = item.get("resolution")
+                size = item.get("size")
+                season = item.get("se")
+                episode = item.get("ep")
+            else:
+                url = getattr(item, "resourceLink", None)
+                resolution_val = getattr(item, "resolution", None)
+                size = getattr(item, "size", None)
+                season = getattr(item, "se", None)
+                episode = getattr(item, "ep", None)
+
+            if url:
+                download_links.append({
+                    "url": url,
+                    "resolution": resolution_val,
+                    "size": size,
+                    "season": season,
+                    "episode": episode,
+                })
 
         if not download_links:
             raise HTTPException(status_code=404, detail="لم يتم العثور على روابط تحميل")
