@@ -1,6 +1,7 @@
+
 """
 تطبيق FastAPI بسيط للحصول على روابط التحميل من مكتبة moviebox-api
-تم التصحيح النهائي لمعالجة مخرجات get_content_model_all بشكل صحيح
+هذا التطبيق جاهز للنشر على Vercel
 """
 
 import logging
@@ -32,63 +33,36 @@ async def get_download_links(
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
 
-    # تجهيز قيمة الجودة
+    # ✅ تحويل الجودة من رقم إلى ResolutionType
     if resolution is not None:
         try:
+            # نبحث عن الجودة المناسبة بناءً على الرقم المدخل
             res_enum = ResolutionType(resolution)
         except ValueError:
+            # إذا لم يجد الجودة (مثلاً 0)، نستخدم UNSPECIFIED (كل الجودات)
             res_enum = ResolutionType.UNSPECIFIED
     else:
+        # إذا لم يرسل المستخدم جودة، نجلب كل الجودات
         res_enum = ResolutionType.UNSPECIFIED
 
     try:
         async with MovieBoxHttpClient() as client:
             dl = DownloadableVideoFilesDetail(
                 client_session=client,
-                resolution=res_enum
+                resolution=res_enum  # ✅ الآن كائن ResolutionType
             )
-            
-            all_items = []
-            # استخدام get_content_model_all لجلب كل الصفحات
-            async for content_model in dl.get_content_model_all(subject_id):
-                # ✅ التصحيح: RootDownloadableFilesDetailModel يحتوي على list من كائنات VideoFileMetadata
-                if hasattr(content_model, 'root'):
-                    # بعض النماذج قد تكون مغلفة
-                    items = content_model.root
-                    if isinstance(items, list):
-                        all_items.extend(items)
-                elif hasattr(content_model, 'list'):
-                    all_items.extend(content_model.list)
-                elif isinstance(content_model, list):
-                    all_items.extend(content_model)
+            data = await dl.get_content(subject_id)
 
+        items = data.get("list", [])
         download_links = []
-        for item in all_items:
-            try:
-                # التعامل مع item ككائن VideoFileMetadata (يحتوي على attributes)
-                if hasattr(item, 'resource_link'):
-                    url = item.resource_link
-                elif hasattr(item, 'resourceLink'):
-                    url = item.resourceLink
-                else:
-                    url = None
-
-                resolution_val = getattr(item, 'resolution', None)
-                size = getattr(item, 'size', None)
-                season = getattr(item, 'se', None) or getattr(item, 'season', None)
-                episode = getattr(item, 'ep', None) or getattr(item, 'episode', None)
-
-                if url:
-                    download_links.append({
-                        "url": url,
-                        "resolution": resolution_val,
-                        "size": size,
-                        "season": season,
-                        "episode": episode,
-                    })
-            except Exception as item_error:
-                logger.warning(f"⚠️ خطأ في معالجة عنصر: {item_error}")
-                continue
+        for item in items:
+            download_links.append({
+                "url": item.get("resourceLink"),
+                "resolution": item.get("resolution"),
+                "size": item.get("size"),
+                "season": item.get("se"),
+                "episode": item.get("ep"),
+            })
 
         if not download_links:
             raise HTTPException(status_code=404, detail="لم يتم العثور على روابط تحميل")
