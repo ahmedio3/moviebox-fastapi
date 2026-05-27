@@ -26,23 +26,26 @@ async def startup_event():
 @app.get("/get_download_links")
 async def get_download_links(
     subject_id: str = Query(..., description="معرف الفيلم/المسلسل"),
-    resolution: int = Query(1080, description="دقة الفيديو (مثلاً: 1080)")
+    resolution: int = Query(None, description="جودة الفيديو (مثلاً: 1080)، اتركه فارغاً لاستعراض كل الجودات")
 ):
+    """
+    نقطة النهاية لجلب روابط التحميل.
+    إذا تُرك resolution فارغاً، سيتم جلب جميع الجودات المتاحة.
+    """
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
 
+    # ✅ لو المستخدم محددش جودة، نمرر 0 (UNSPECIFIED) للحصول على كل الجودات
+    res_value = resolution if resolution is not None else 0
+
     try:
-        # 1. فتح اتصال HTTP مع MovieBox
         async with MovieBoxHttpClient() as client:
-            # 2. إنشاء كائن تحميل الفيديوهات وتمرير العميل والدقة
             dl = DownloadableVideoFilesDetail(
                 client_session=client,
-                resolution=resolution
+                resolution=res_value
             )
-            # 3. جلب البيانات
             data = await dl.get_content(subject_id)
 
-        # 4. استخراج الروابط (البيانات تحت مفتاح "list")
         items = data.get("list", [])
         download_links = []
         for item in items:
