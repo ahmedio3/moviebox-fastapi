@@ -1,9 +1,9 @@
 """
 تطبيق FastAPI بسيط للحصول على روابط التحميل من مكتبة moviebox-api
-هذا التطبيق جاهز للنشر على Vercel
 """
 
 import logging
+import asyncio
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
@@ -23,6 +23,39 @@ app = FastAPI(
 RESOLUTIONS = [360, 480, 720, 1080]
 
 
+# ✅ Subclass يدعم se/ep
+class EpisodeDownload(DownloadableVideoFilesDetail):
+    def __init__(self, *args, season: int = None, episode: int = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._season = season
+        self._episode = episode
+
+    def _create_params(self, subject_id: str) -> dict:
+        params = super()._create_params(subject_id)
+        if self._season is not None:
+            params["se"] = self._season
+        if self._episode is not None:
+            params["ep"] = self._episode
+        return params
+
+
+async def fetch_episode_resolution(client, subject_id, season, episode, res_value):
+    """جلب حلقة واحدة بجودة محددة"""
+    try:
+        dl = EpisodeDownload(
+            client_session=client,
+            resolution=ResolutionType(res_value),
+            season=season,
+            episode=episode,
+        )
+        data = await dl.get_content(subject_id)
+        items = data.get("list", [])
+        return items
+    except Exception as e:
+        logger.warning(f"⚠️ S{season}E{episode} @ {res_value}p فشل: {e}")
+        return []
+
+
 @app.on_event("startup")
 async def startup_event():
     logger.info("🚀 Server started successfully!")
@@ -31,12 +64,11 @@ async def startup_event():
 @app.get("/get_download_links")
 async def get_download_links(
     subject_id: str = Query(..., description="معرف الفيلم/المسلسل"),
-    resolution: int = Query(None, description="جودة الفيديو (مثلاً: 1080)، اتركه فارغاً لاستعراض كل الجودات")
+    resolution: int = Query(None, description="جودة الفيديو (مثلاً: 1080)")
 ):
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
 
-    # تحويل الجودة من رقم إلى ResolutionType
     if resolution is not None:
         try:
             res_enum = ResolutionType(resolution)
@@ -48,45 +80,48 @@ async def get_download_links(
     try:
         async with MovieBoxHttpClient() as client:
 
-            # ── جلب البيانات الأساسية ──────────────────────────────
+            # ── جلب البيانات الأساسية (دايماً 360p للمسلسلات) ──────
             dl = DownloadableVideoFilesDetail(
                 client_session=client,
                 resolution=res_enum
             )
             data = await dl.get_content(subject_id)
-            items = data.get("list", [])
+            base_items = data.get("list", [])
 
-            # ── هل هو مسلسل؟ ──────────────────────────────────────
+            # ── هل هو مسلسل؟ ───────────────────────────────────────
             is_series = any(
                 item.get("se", 0) != 0 or item.get("ep", 0) != 0
-                for item in items
+                for item in base_items
             )
 
-            # ── لو مسلسل وطلب كل الجودات → loop على كل جودة ──────
+            all_items = list(base_items)
+
+            # ── لو مسلسل وطلب كل الجودات → جلب كل حلقة بكل جودة ──
             if is_series and res_enum == ResolutionType.UNSPECIFIED:
-                all_items = list(items)  # يحتوي على 360p بالفعل
 
-                for res_value in RESOLUTIONS[1:]:  # 480, 720, 1080
-                    try:
-                        dl_res = DownloadableVideoFilesDetail(
-                            client_session=client,
-                            resolution=ResolutionType(res_value)
-                        )
-                        extra_data = await dl_res.get_content(subject_id)
-                        extra_items = extra_data.get("list", [])
-                        all_items.extend(extra_items)
-                        logger.info(f"✅ جودة {res_value}p: {len(extra_items)} حلقة")
-                    except Exception as e:
-                        logger.warning(f"⚠️ جودة {res_value}p غير متاحة: {e}")
-                        continue
+                # استخراج قائمة الحلقات الفريدة
+                episodes = [
+                    (item.get("se", 0), item.get("ep", 0))
+                    for item in base_items
+                ]
 
-                items = all_items
+                # بناء كل المهام دفعة واحدة (asyncio.gather للسرعة)
+                tasks = [
+                    fetch_episode_resolution(client, subject_id, se, ep, res)
+                    for res in RESOLUTIONS[1:]   # 480, 720, 1080
+                    for (se, ep) in episodes
+                ]
+
+                results = await asyncio.gather(*tasks)
+
+                for items_chunk in results:
+                    all_items.extend(items_chunk)
 
         # ── تجميع النتائج وإزالة المكررات ─────────────────────────
         download_links = []
         seen = set()
 
-        for item in items:
+        for item in all_items:
             key = (item.get("se"), item.get("ep"), item.get("resolution"))
             if key in seen:
                 continue
