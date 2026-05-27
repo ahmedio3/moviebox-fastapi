@@ -1,6 +1,6 @@
 """
 تطبيق FastAPI بسيط للحصول على روابط التحميل من مكتبة moviebox-api
-هذا التطبيق مصمم للنشر على Render.com (الخطة المجانية)
+هذا التطبيق جاهز للنشر على Vercel
 """
 
 import logging
@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from moviebox_api.v3.core import DownloadableVideoFilesDetail
 from moviebox_api.v3.http_client import MovieBoxHttpClient
+from moviebox_api.v3.constants import ResolutionType
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,21 +29,26 @@ async def get_download_links(
     subject_id: str = Query(..., description="معرف الفيلم/المسلسل"),
     resolution: int = Query(None, description="جودة الفيديو (مثلاً: 1080)، اتركه فارغاً لاستعراض كل الجودات")
 ):
-    """
-    نقطة النهاية لجلب روابط التحميل.
-    إذا تُرك resolution فارغاً، سيتم جلب جميع الجودات المتاحة.
-    """
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
 
-    # ✅ لو المستخدم محددش جودة، نمرر 0 (UNSPECIFIED) للحصول على كل الجودات
-    res_value = resolution if resolution is not None else 0
+    # ✅ تحويل الجودة من رقم إلى ResolutionType
+    if resolution is not None:
+        try:
+            # نبحث عن الجودة المناسبة بناءً على الرقم المدخل
+            res_enum = ResolutionType(resolution)
+        except ValueError:
+            # إذا لم يجد الجودة (مثلاً 0)، نستخدم UNSPECIFIED (كل الجودات)
+            res_enum = ResolutionType.UNSPECIFIED
+    else:
+        # إذا لم يرسل المستخدم جودة، نجلب كل الجودات
+        res_enum = ResolutionType.UNSPECIFIED
 
     try:
         async with MovieBoxHttpClient() as client:
             dl = DownloadableVideoFilesDetail(
                 client_session=client,
-                resolution=res_value
+                resolution=res_enum  # ✅ الآن كائن ResolutionType
             )
             data = await dl.get_content(subject_id)
 
