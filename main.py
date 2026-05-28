@@ -1,5 +1,6 @@
 """
 تطبيق FastAPI بسيط للحصول على روابط التحميل من مكتبة moviebox-api
+مع دعم اختيار الدبلجة
 """
 
 import logging
@@ -7,9 +8,10 @@ import asyncio
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from moviebox_api.v3.core import DownloadableVideoFilesDetail
+from moviebox_api.v3.core import DownloadableVideoFilesDetail, ItemDetails
 from moviebox_api.v3.http_client import MovieBoxHttpClient
 from moviebox_api.v3.constants import ResolutionType
+from moviebox_api.v3.helpers import get_dub_or_raise
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,8 +24,6 @@ app = FastAPI(
 
 RESOLUTIONS = [360, 480, 720, 1080]
 
-
-# ✅ Subclass يدعم se/ep
 class EpisodeDownload(DownloadableVideoFilesDetail):
     def __init__(self, *args, season: int = None, episode: int = None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -37,7 +37,6 @@ class EpisodeDownload(DownloadableVideoFilesDetail):
         if self._episode is not None:
             params["ep"] = self._episode
         return params
-
 
 async def fetch_episode_resolution(client, subject_id, season, episode, res_value):
     """جلب حلقة واحدة بجودة محددة"""
@@ -55,16 +54,15 @@ async def fetch_episode_resolution(client, subject_id, season, episode, res_valu
         logger.warning(f"⚠️ S{season}E{episode} @ {res_value}p فشل: {e}")
         return []
 
-
 @app.on_event("startup")
 async def startup_event():
     logger.info("🚀 Server started successfully!")
 
-
 @app.get("/get_download_links")
 async def get_download_links(
     subject_id: str = Query(..., description="معرف الفيلم/المسلسل"),
-    resolution: int = Query(None, description="جودة الفيديو (مثلاً: 1080)")
+    resolution: int = Query(None, description="جودة الفيديو (مثلاً: 1080)"),
+    dub: str = Query("Original", description="لغة الدبلجة (مثلاً: Original, Hindi, English)")
 ):
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
@@ -79,8 +77,12 @@ async def get_download_links(
 
     try:
         async with MovieBoxHttpClient() as client:
+            # --- معالجة الدبلجة ---
+            item_details_obj = ItemDetails(client_session=client)
+            details_data = await item_details_obj.get_content_model(subject_id)
+            target_dub = get_dub_or_raise(details_data, dub)
+            # ----------------------
 
-            # ── جلب البيانات الأساسية (دايماً 360p للمسلسلات) ──────
             dl = DownloadableVideoFilesDetail(
                 client_session=client,
                 resolution=res_enum
@@ -88,7 +90,6 @@ async def get_download_links(
             data = await dl.get_content(subject_id)
             base_items = data.get("list", [])
 
-            # ── هل هو مسلسل؟ ───────────────────────────────────────
             is_series = any(
                 item.get("se", 0) != 0 or item.get("ep", 0) != 0
                 for item in base_items
@@ -96,31 +97,22 @@ async def get_download_links(
 
             all_items = list(base_items)
 
-            # ── لو مسلسل وطلب كل الجودات → جلب كل حلقة بكل جودة ──
             if is_series and res_enum == ResolutionType.UNSPECIFIED:
-
-                # استخراج قائمة الحلقات الفريدة
                 episodes = [
                     (item.get("se", 0), item.get("ep", 0))
                     for item in base_items
                 ]
-
-                # بناء كل المهام دفعة واحدة (asyncio.gather للسرعة)
                 tasks = [
                     fetch_episode_resolution(client, subject_id, se, ep, res)
-                    for res in RESOLUTIONS[1:]   # 480, 720, 1080
+                    for res in RESOLUTIONS[1:]
                     for (se, ep) in episodes
                 ]
-
                 results = await asyncio.gather(*tasks)
-
                 for items_chunk in results:
                     all_items.extend(items_chunk)
 
-        # ── تجميع النتائج وإزالة المكررات ─────────────────────────
         download_links = []
         seen = set()
-
         for item in all_items:
             key = (item.get("se"), item.get("ep"), item.get("resolution"))
             if key in seen:
@@ -150,18 +142,16 @@ async def get_download_links(
         logger.error(f"❌ خطأ: {e}")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
-
 @app.get("/health")
 async def health_check():
     return JSONResponse(content={"status": "healthy", "message": "✅ الخادم يعمل"})
-
 
 @app.get("/")
 async def root():
     return JSONResponse(content={
         "name": "MovieBox FastAPI Backend",
         "endpoints": {
-            "get_download_links": "/get_download_links?subject_id=ID&resolution=1080",
+            "get_download_links": "/get_download_links?subject_id=ID&resolution=1080&dub=Original",
             "health_check": "/health"
         }
     })
