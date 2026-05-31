@@ -1,5 +1,5 @@
 """
-تطبيق FastAPI للحصول على روابط التحميل والبحث من مكتبة moviebox-api
+تطبيق FastAPI للحصول على روابط التحميل والبحث والترجمة من مكتبة moviebox-api
 جاهز للنشر على Vercel
 """
 
@@ -8,7 +8,11 @@ import asyncio
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from moviebox_api.v3.core import DownloadableVideoFilesDetail, Search
+from moviebox_api.v3.core import (
+    DownloadableVideoFilesDetail,
+    DownloadableCaptionFileDetails,
+    Search,
+)
 from moviebox_api.v3.http_client import MovieBoxHttpClient
 from moviebox_api.v3.constants import ResolutionType, SubjectType
 
@@ -23,54 +27,32 @@ app = FastAPI(
 
 RESOLUTIONS = [360, 480, 720, 1080]
 
-# تحويل كود اللغة من TMDB (ISO 639-1) إلى اسم اللغة في MovieBox
 TMDB_LANG_MAP: dict[str, list[str]] = {
-    "en": ["english"],
-    "de": ["german", "deutsch"],
-    "ja": ["japanese"],
-    "ko": ["korean"],
-    "fr": ["french"],
-    "es": ["spanish"],
-    "ar": ["arabic"],
-    "hi": ["hindi"],
-    "zh": ["chinese", "mandarin", "cantonese"],
-    "it": ["italian"],
-    "pt": ["portuguese"],
-    "ru": ["russian"],
-    "tr": ["turkish"],
-    "th": ["thai"],
-    "nl": ["dutch"],
-    "sv": ["swedish"],
-    "da": ["danish"],
-    "no": ["norwegian"],
-    "fi": ["finnish"],
-    "pl": ["polish"],
-    "cs": ["czech"],
-    "hu": ["hungarian"],
-    "ro": ["romanian"],
-    "id": ["indonesian"],
-    "ms": ["malay"],
+    "en": ["english"], "de": ["german", "deutsch"], "ja": ["japanese"],
+    "ko": ["korean"], "fr": ["french"], "es": ["spanish"], "ar": ["arabic"],
+    "hi": ["hindi"], "zh": ["chinese", "mandarin", "cantonese"],
+    "it": ["italian"], "pt": ["portuguese"], "ru": ["russian"],
+    "tr": ["turkish"], "th": ["thai"], "nl": ["dutch"], "sv": ["swedish"],
+    "da": ["danish"], "no": ["norwegian"], "fi": ["finnish"],
+    "pl": ["polish"], "cs": ["czech"], "hu": ["hungarian"],
+    "ro": ["romanian"], "id": ["indonesian"], "ms": ["malay"],
     "vi": ["vietnamese"],
 }
 
-# كلمات تدل على نسخ مدبلجة (نتجنبها)
 DUBBED_KEYWORDS = [
-    "hindi", "dubbed", " dub", "tamil", "telugu",
-    "malayalam", "kannada", "bengali", "marathi",
-    "[hindi]", "(hindi)", "urdu", "punjabi",
+    "hindi", "dubbed", " dub", "tamil", "telugu", "malayalam",
+    "kannada", "bengali", "marathi", "[hindi]", "(hindi)", "urdu", "punjabi",
 ]
 
 
-# ─── Helpers ────────────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def is_dubbed(title: str) -> bool:
-    """كشف النسخ المدبلجة من العنوان"""
     t = title.lower()
     return any(kw in t for kw in DUBBED_KEYWORDS)
 
 
 def parse_languages(lang_raw) -> list[str]:
-    """تحليل حقل اللغة سواء كان string أو list"""
     if isinstance(lang_raw, list):
         return [str(l).strip().lower() for l in lang_raw if l]
     if isinstance(lang_raw, str) and lang_raw:
@@ -79,15 +61,10 @@ def parse_languages(lang_raw) -> list[str]:
 
 
 def get_cover_url(cover) -> str | None:
-    """استخراج رابط البوستر بأمان"""
     if not cover:
         return None
     if isinstance(cover, dict):
-        return (
-            cover.get("url")
-            or cover.get("thumbnailUrl")
-            or cover.get("thumbnail_url")
-        )
+        return cover.get("url") or cover.get("thumbnailUrl") or cover.get("thumbnail_url")
     for attr in ["url", "thumbnailUrl", "thumbnail_url"]:
         val = getattr(cover, attr, None)
         if val:
@@ -96,52 +73,35 @@ def get_cover_url(cover) -> str | None:
 
 
 def score_result(item: dict, original_language: str | None, query: str) -> int:
-    """
-    تسجيل نقاط لكل نتيجة بحث لاختيار الأنسب.
-    الأعلى نقاطاً يظهر أولاً.
-    """
     score = 0
     title = item.get("title", "")
-
-    # عقوبة كبيرة للنسخ المدبلجة
     if is_dubbed(title):
         score -= 200
-
-    # مكافأة تطابق اللغة الأصلية من TMDB
     if original_language:
         target_langs = TMDB_LANG_MAP.get(original_language.lower(), [])
         item_langs = parse_languages(item.get("language", ""))
         if target_langs and any(tl in item_langs for tl in target_langs):
             score += 100
-
-    # مكافأة التطابق الدقيق للعنوان
     if title.lower().strip() == query.lower().strip():
         score += 50
     elif query.lower().strip() in title.lower():
         score += 20
-
-    # مكافأة وجود موارد قابلة للتحميل
     if item.get("hasResource"):
         score += 10
-
     return score
 
 
 def format_search_item(item: dict) -> dict:
-    """تنسيق عنصر نتيجة البحث للإرسال"""
     release_date = item.get("releaseDate", "") or ""
     year = release_date[:4] if len(release_date) >= 4 else ""
-
     lang_raw = item.get("language", "")
-    if isinstance(lang_raw, str):
-        languages = [l.strip() for l in lang_raw.split(",") if l.strip()]
-    else:
-        languages = [str(l) for l in (lang_raw or [])]
-
+    languages = (
+        [l.strip() for l in lang_raw.split(",") if l.strip()]
+        if isinstance(lang_raw, str)
+        else [str(l) for l in (lang_raw or [])]
+    )
     season_count = item.get("seNum", 0) or 0
-    subject_type_val = item.get("subjectType", 0)
-    is_series = season_count > 0 or subject_type_val == 2
-
+    is_series = season_count > 0 or item.get("subjectType", 0) == 2
     return {
         "subject_id": item.get("subjectId", ""),
         "title": item.get("title", ""),
@@ -154,6 +114,31 @@ def format_search_item(item: dict) -> dict:
         "country": item.get("countryName", ""),
         "description": (item.get("description") or "")[:300],
         "has_resource": bool(item.get("hasResource", False)),
+    }
+
+
+def parse_ext_captions(raw_captions: list) -> dict:
+    """
+    تحليل extCaptions الموجودة مباشرة مع كل رابط تحميل.
+    يرجع: { "has_arabic": bool, "arabic_url": str|None, "all": [...] }
+    """
+    all_subs = []
+    arabic_url = None
+    for cap in raw_captions:
+        if not isinstance(cap, dict):
+            continue
+        entry = {
+            "language_code": cap.get("lan", ""),
+            "language_name": cap.get("lanName", ""),
+            "url": str(cap.get("url", "")),
+        }
+        all_subs.append(entry)
+        if cap.get("lan", "").lower() == "ar":
+            arabic_url = entry["url"]
+    return {
+        "has_arabic": arabic_url is not None,
+        "arabic_url": arabic_url,
+        "all": all_subs,
     }
 
 
@@ -175,7 +160,6 @@ class EpisodeDownload(DownloadableVideoFilesDetail):
 
 
 async def fetch_episode_resolution(client, subject_id, season, episode, res_value):
-    """جلب حلقة واحدة بجودة محددة"""
     try:
         dl = EpisodeDownload(
             client_session=client,
@@ -202,19 +186,12 @@ async def startup_event():
 @app.get("/search")
 async def search_content(
     query: str = Query(..., description="اسم الفيلم أو المسلسل"),
-    original_language: str = Query(
-        None,
-        description="كود اللغة الأصلية من TMDB (مثلاً: en, de, ja, ko)"
-    ),
-    limit: int = Query(8, ge=1, le=20, description="عدد النتائج (1-20)"),
+    original_language: str = Query(None, description="كود اللغة مثل: en, de, ja, ko"),
+    limit: int = Query(8, ge=1, le=20),
 ):
-    """
-    البحث عن فيلم أو مسلسل في MovieBox.
-    يرتب النتائج حسب تطابق اللغة الأصلية ويُخفي النسخ المدبلجة.
-    """
+    """بحث MovieBox مستقل تماماً — لا علاقة له بـ TMDB."""
     if not query.strip():
         raise HTTPException(status_code=400, detail="query لا يمكن أن يكون فارغاً")
-
     try:
         async with MovieBoxHttpClient() as client:
             searcher = Search(
@@ -223,33 +200,15 @@ async def search_content(
                 subject_type=SubjectType.ALL,
             )
             data = await searcher.get_content()
-
         raw_items = data.get("items", [])
-
         if not raw_items:
-            return JSONResponse(content={
-                "status": "success",
-                "query": query,
-                "total_results": 0,
-                "results": [],
-            })
-
-        # ترتيب النتائج بالنقاط
-        scored = [
-            (score_result(item, original_language, query), item)
-            for item in raw_items
-        ]
+            return JSONResponse(content={"status": "success", "query": query,
+                                         "total_results": 0, "results": []})
+        scored = [(score_result(item, original_language, query), item) for item in raw_items]
         scored.sort(key=lambda x: x[0], reverse=True)
-
         results = [format_search_item(item) for _, item in scored[:limit]]
-
-        return JSONResponse(content={
-            "status": "success",
-            "query": query,
-            "total_results": len(results),
-            "results": results,
-        })
-
+        return JSONResponse(content={"status": "success", "query": query,
+                                     "total_results": len(results), "results": results})
     except HTTPException:
         raise
     except Exception as e:
@@ -259,15 +218,14 @@ async def search_content(
 
 @app.get("/get_download_links")
 async def get_download_links(
-    subject_id: str = Query(..., description="معرف الفيلم/المسلسل"),
-    resolution: int = Query(
-        None,
-        description="جودة الفيديو (360, 480, 720, 1080) — اتركه فارغاً لكل الجودات"
-    ),
+    subject_id: str = Query(...),
+    resolution: int = Query(None, description="360,480,720,1080 — فارغ=كل الجودات"),
 ):
     """
-    جلب روابط التحميل لفيلم أو مسلسل.
-    للمسلسلات يجلب كل الحلقات بكل الجودات المتاحة.
+    جلب روابط التحميل.
+    كل رابط يحتوي على:
+    - resource_id  ← للاستخدام في /get_subtitles لو extCaptions فاضية
+    - ext_captions ← ترجمات جاهزة مباشرة (بدون request إضافي)
     """
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
@@ -282,16 +240,10 @@ async def get_download_links(
 
     try:
         async with MovieBoxHttpClient() as client:
-
-            # جلب البيانات الأساسية
-            dl = DownloadableVideoFilesDetail(
-                client_session=client,
-                resolution=res_enum,
-            )
+            dl = DownloadableVideoFilesDetail(client_session=client, resolution=res_enum)
             data = await dl.get_content(subject_id)
             base_items = data.get("list", [])
 
-            # هل هو مسلسل؟
             is_series = any(
                 item.get("se", 0) != 0 or item.get("ep", 0) != 0
                 for item in base_items
@@ -299,25 +251,16 @@ async def get_download_links(
 
             all_items = list(base_items)
 
-            # للمسلسلات: جلب كل حلقة بكل جودة بالتوازي
             if is_series and res_enum == ResolutionType.UNSPECIFIED:
-                episodes = [
-                    (item.get("se", 0), item.get("ep", 0))
-                    for item in base_items
-                ]
-
+                episodes = [(item.get("se", 0), item.get("ep", 0)) for item in base_items]
                 tasks = [
                     fetch_episode_resolution(client, subject_id, se, ep, res)
-                    for res in RESOLUTIONS[1:]   # 480, 720, 1080
+                    for res in RESOLUTIONS[1:]
                     for (se, ep) in episodes
                 ]
-
-                results = await asyncio.gather(*tasks)
-
-                for chunk in results:
+                for chunk in await asyncio.gather(*tasks):
                     all_items.extend(chunk)
 
-        # تجميع النتائج وإزالة المكررات
         download_links = []
         seen: set[tuple] = set()
 
@@ -326,19 +269,27 @@ async def get_download_links(
             if key in seen:
                 continue
             seen.add(key)
+
+            # ── extCaptions: ترجمات جاهزة مع الرابط مباشرة ──────────
+            raw_ext = item.get("extCaptions") or []
+            captions_parsed = parse_ext_captions(raw_ext)
+
             download_links.append({
                 "url": item.get("resourceLink"),
                 "resolution": item.get("resolution"),
                 "size": item.get("size"),
                 "season": item.get("se"),
                 "episode": item.get("ep"),
+                "resource_id": item.get("resourceId"),       # للـ /get_subtitles
+                # ── الترجمات الجاهزة (موجودة مباشرة بدون request إضافي) ──
+                "subtitles_available": captions_parsed["has_arabic"] or len(captions_parsed["all"]) > 0,
+                "has_arabic_subtitle": captions_parsed["has_arabic"],
+                "arabic_subtitle_url": captions_parsed["arabic_url"],
+                "all_subtitles": captions_parsed["all"],
             })
 
         if not download_links:
-            raise HTTPException(
-                status_code=404,
-                detail="لم يتم العثور على روابط تحميل لهذا المحتوى"
-            )
+            raise HTTPException(status_code=404, detail="لم يتم العثور على روابط تحميل")
 
         return JSONResponse(content={
             "status": "success",
@@ -354,6 +305,55 @@ async def get_download_links(
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
+@app.get("/get_subtitles")
+async def get_subtitles(
+    subject_id: str = Query(...),
+    resource_id: str = Query(..., description="من حقل resource_id في روابط التحميل"),
+):
+    """
+    جلب الترجمات عبر request منفصل.
+    استخدم هذا فقط لو all_subtitles في /get_download_links كان فاضياً.
+    """
+    if not subject_id.strip() or not resource_id.strip():
+        raise HTTPException(status_code=400, detail="subject_id و resource_id مطلوبان")
+    try:
+        async with MovieBoxHttpClient() as client:
+            caption_fetcher = DownloadableCaptionFileDetails(client_session=client)
+            data = await caption_fetcher.get_content(subject_id, resource_id)
+
+        raw_captions = data.get("extCaptions", [])
+        all_subtitles = []
+        arabic_subtitle = None
+
+        for cap in raw_captions:
+            entry = {
+                "language_code": cap.get("lan", ""),
+                "language_name": cap.get("lanName", ""),
+                "url": str(cap.get("url", "")),
+                "size": cap.get("size", 0),
+                "delay": cap.get("delay", 0),
+            }
+            all_subtitles.append(entry)
+            if cap.get("lan", "").lower() == "ar":
+                arabic_subtitle = entry
+
+        return JSONResponse(content={
+            "status": "success",
+            "subject_id": subject_id,
+            "resource_id": resource_id,
+            "has_arabic": arabic_subtitle is not None,
+            "arabic_subtitle": arabic_subtitle,
+            "all_subtitles": all_subtitles,
+            "total_languages": len(all_subtitles),
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ خطأ في الترجمة: {e}")
+        raise HTTPException(status_code=500, detail=f"Subtitles error: {str(e)}")
+
+
 @app.get("/health")
 async def health_check():
     return JSONResponse(content={"status": "healthy", "message": "✅ الخادم يعمل"})
@@ -363,10 +363,11 @@ async def health_check():
 async def root():
     return JSONResponse(content={
         "name": "MovieBox FastAPI Backend",
-        "version": "2.0",
+        "version": "3.0",
         "endpoints": {
-            "search": "/search?query=TITLE&original_language=en&limit=8",
+            "search":             "/search?query=TITLE&original_language=en&limit=8",
             "get_download_links": "/get_download_links?subject_id=ID&resolution=1080",
-            "health_check": "/health",
+            "get_subtitles":      "/get_subtitles?subject_id=ID&resource_id=RID",
+            "health_check":       "/health",
         },
     })
