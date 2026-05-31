@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ─── Lifespan (بدل @app.on_event الـ deprecated) ─────────────────────────────
+# ─── Lifespan ─────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,8 +39,12 @@ app = FastAPI(
     redoc_url=None,
 )
 
-# كل الـ resolutions المتاحة
 ALL_RESOLUTIONS = [360, 480, 720, 1080]
+
+# نجرب per_page كبير عشان نقلل عدد الـ requests
+# المكتبة عندها validate_per_page_and_raise — لو رفضت نجرب أصغر
+MAX_PER_PAGE = 100
+FALLBACK_PER_PAGE = 20
 
 TMDB_LANG_MAP: dict[str, list[str]] = {
     "en": ["english"], "de": ["german", "deutsch"], "ja": ["japanese"],
@@ -63,8 +67,7 @@ DUBBED_KEYWORDS = [
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def is_dubbed(title: str) -> bool:
-    t = title.lower()
-    return any(kw in t for kw in DUBBED_KEYWORDS)
+    return any(kw in title.lower() for kw in DUBBED_KEYWORDS)
 
 
 def parse_languages(lang_raw) -> list[str]:
@@ -133,7 +136,6 @@ def format_search_item(item: dict) -> dict:
 
 
 def parse_ext_captions(raw_captions: list) -> dict:
-    """تحليل extCaptions الموجودة مباشرة مع كل رابط تحميل."""
     all_subs = []
     arabic_url = None
     for cap in raw_captions:
@@ -154,8 +156,42 @@ def parse_ext_captions(raw_captions: list) -> dict:
     }
 
 
+def video_model_to_dict(video_file) -> dict:
+    """
+    تحويل VideoFileMetadata Pydantic model لـ dict خام
+    مع الحفاظ على extCaptions لو موجودة.
+    """
+    ext_caps = []
+    for attr in ["ext_captions", "extCaptions"]:
+        val = getattr(video_file, attr, None)
+        if val:
+            converted = []
+            for c in val:
+                if isinstance(c, dict):
+                    converted.append(c)
+                else:
+                    converted.append({
+                        "lan": getattr(c, "lan", ""),
+                        "lanName": getattr(c, "lan_name", getattr(c, "lanName", "")),
+                        "url": str(getattr(c, "url", "")),
+                        "size": getattr(c, "size", 0),
+                        "delay": getattr(c, "delay", 0),
+                    })
+            ext_caps = converted
+            break
+
+    return {
+        "resourceLink": str(video_file.url) if video_file.url else None,
+        "resolution": video_file.resolution,
+        "size": str(video_file.size) if video_file.size else None,
+        "se": video_file.season,
+        "ep": video_file.episode,
+        "resourceId": str(video_file.resource_id) if video_file.resource_id else None,
+        "extCaptions": ext_caps,
+    }
+
+
 def format_download_item(item: dict) -> dict:
-    """تحويل item خام من الـ API لصيغة موحدة."""
     raw_ext = item.get("extCaptions") or []
     captions_parsed = parse_ext_captions(raw_ext)
     return {
@@ -172,7 +208,7 @@ def format_download_item(item: dict) -> dict:
     }
 
 
-# ─── Core fetch helpers ───────────────────────────────────────────────────────
+# ─── الدالة الأساسية للجلب ────────────────────────────────────────────────────
 
 async def fetch_all_pages_for_resolution(
     client: MovieBoxHttpClient,
@@ -180,81 +216,52 @@ async def fetch_all_pages_for_resolution(
     resolution: int,
 ) -> list[dict]:
     """
-    يجيب كل الصفحات لـ resolution معينة باستخدام pagination الأصلية من المكتبة.
-    get_content_model_all() بتتعامل مع has_more أوتوماتيك.
+    يجيب كل الحلقات لـ resolution معين — كل الصفحات.
+
+    المشكلة القديمة كانت:
+      - الكود كان بيحاول يقرأ pager من dict خام وكان بيفشل
+      - نتيجة: has_more = False دايماً → صفحة واحدة بس
+
+    الحل:
+      - get_content_model_all() من المكتبة بتتعامل مع pager كـ Pydantic model صح
+      - per_page=100 عشان نقلل عدد الـ requests
+      - retry تلقائي بـ per_page=20 لو 100 مرفوض
     """
     items = []
-    try:
-        res_enum = ResolutionType(resolution)
-        dl = DownloadableVideoFilesDetail(
-            client_session=client,
-            resolution=res_enum,
-        )
-        async for page_model in dl.get_content_model_all(subject_id):
-            for video_file in page_model.list:
-                # نحول الـ model لـ dict
-                raw = {
-                    "resourceLink": str(video_file.url) if video_file.url else None,
-                    "resolution": video_file.resolution,
-                    "size": str(video_file.size) if video_file.size else None,
-                    "se": video_file.season,
-                    "ep": video_file.episode,
-                    "resourceId": video_file.resource_id,
-                    "extCaptions": [],  # extCaptions مش موجودة في الـ model مباشرة
-                }
-                items.append(raw)
 
-    except Exception as e:
-        logger.warning(f"⚠️ Resolution {resolution}p فشل: {e}")
-
-    return items
-
-
-async def fetch_all_pages_raw(
-    client: MovieBoxHttpClient,
-    subject_id: str,
-    resolution: int,
-) -> list[dict]:
-    """
-    نفس الفكرة بس بنستخدم get_content الخام عشان نحتفظ بـ extCaptions.
-    الـ model بتلفّ بعض الحقول وممكن تضيّع extCaptions.
-    """
-    items = []
-    try:
-        res_enum = ResolutionType(resolution)
-        dl = DownloadableVideoFilesDetail(
-            client_session=client,
-            resolution=res_enum,
-        )
-
-        # أول صفحة
-        data = await dl.get_content(subject_id)
-        page_items = data.get("list", [])
-        items.extend(page_items)
-
-        # باقي الصفحات لو في
-        pager = data.get("pager", {})
-        has_more = pager.get("hasMore", False) if isinstance(pager, dict) else getattr(pager, "has_more", False)
-        next_page_num = pager.get("nextPage", 2) if isinstance(pager, dict) else getattr(pager, "next_page", 2)
-
-        while has_more:
-            dl_next = DownloadableVideoFilesDetail(
+    for per_page_val in [MAX_PER_PAGE, FALLBACK_PER_PAGE]:
+        items = []
+        try:
+            res_enum = ResolutionType(resolution)
+            dl = DownloadableVideoFilesDetail(
                 client_session=client,
                 resolution=res_enum,
-                page=next_page_num,
+                per_page=per_page_val,
             )
-            data = await dl_next.get_content(subject_id)
-            page_items = data.get("list", [])
-            if not page_items:
-                break
-            items.extend(page_items)
 
-            pager = data.get("pager", {})
-            has_more = pager.get("hasMore", False) if isinstance(pager, dict) else getattr(pager, "has_more", False)
-            next_page_num = pager.get("nextPage", next_page_num + 1) if isinstance(pager, dict) else getattr(pager, "next_page", next_page_num + 1)
+            page_count = 0
+            async for page_model in dl.get_content_model_all(subject_id):
+                page_count += 1
+                for video_file in page_model.list:
+                    items.append(video_model_to_dict(video_file))
+                logger.info(
+                    f"📄 {resolution}p — صفحة {page_count}: "
+                    f"{len(page_model.list)} حلقة | "
+                    f"has_more={page_model.pager.has_more}"
+                )
 
-    except Exception as e:
-        logger.warning(f"⚠️ Resolution {resolution}p فشل: {e}")
+            logger.info(f"✅ {resolution}p: {len(items)} رابط في {page_count} صفحة")
+            break  # نجح
+
+        except ValueError as ve:
+            logger.warning(f"⚠️ per_page={per_page_val} مرفوض ({ve}) — بنجرب {FALLBACK_PER_PAGE}")
+            if per_page_val == FALLBACK_PER_PAGE:
+                logger.error(f"❌ {resolution}p فشل نهائياً")
+            continue
+
+        except Exception as e:
+            logger.warning(f"⚠️ {resolution}p خطأ: {e}")
+            break
 
     return items
 
@@ -267,7 +274,7 @@ async def search_content(
     original_language: str = Query(None, description="كود اللغة مثل: en, de, ja, ko"),
     limit: int = Query(8, ge=1, le=20),
 ):
-    """بحث MovieBox مستقل تماماً — لا علاقة له بـ TMDB."""
+    """بحث MovieBox مستقل تماماً."""
     if not query.strip():
         raise HTTPException(status_code=400, detail="query لا يمكن أن يكون فارغاً")
     try:
@@ -278,19 +285,23 @@ async def search_content(
                 subject_type=SubjectType.ALL,
             )
             data = await searcher.get_content()
+
         raw_items = data.get("items", [])
         if not raw_items:
             return JSONResponse(content={
                 "status": "success", "query": query,
                 "total_results": 0, "results": []
             })
+
         scored = [(score_result(item, original_language, query), item) for item in raw_items]
         scored.sort(key=lambda x: x[0], reverse=True)
         results = [format_search_item(item) for _, item in scored[:limit]]
+
         return JSONResponse(content={
             "status": "success", "query": query,
             "total_results": len(results), "results": results
         })
+
     except HTTPException:
         raise
     except Exception as e:
@@ -303,58 +314,50 @@ async def get_download_links(
     subject_id: str = Query(...),
     resolution: int = Query(
         None,
-        description="360, 480, 720, 1080 — فارغ = كل الجودات المتاحة",
+        description="360 | 480 | 720 | 1080 — فارغ = كل الجودات",
     ),
 ):
     """
-    جلب روابط التحميل لفيلم أو مسلسل.
+    جلب كل روابط التحميل — كل المواسم، كل الحلقات، كل الجودات.
 
-    - لو resolution فارغ: يجيب كل الجودات المتاحة (360/480/720/1080) بالـ pagination الكاملة.
-    - لو resolution محدد: يجيب الجودة دي بس بكل صفحاتها.
-    - كل رابط يحتوي على resource_id للاستخدام في /get_subtitles لو all_subtitles فاضية.
+    - resolution فارغ  → 360+480+720+1080 بالتوازي مع full pagination
+    - resolution محدد  → الجودة دي بس مع full pagination
     """
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
 
-    # تحديد الـ resolutions المطلوبة
-    if resolution is not None:
-        if resolution not in ALL_RESOLUTIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"resolution غير صالح. الخيارات المتاحة: {ALL_RESOLUTIONS}"
-            )
-        resolutions_to_fetch = [resolution]
-    else:
-        resolutions_to_fetch = ALL_RESOLUTIONS
+    if resolution is not None and resolution not in ALL_RESOLUTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"resolution غير صالح. الخيارات: {ALL_RESOLUTIONS}"
+        )
+
+    resolutions_to_fetch = [resolution] if resolution is not None else ALL_RESOLUTIONS
 
     try:
         async with MovieBoxHttpClient() as client:
-            # جيب كل الـ resolutions بالتوازي
             tasks = [
-                fetch_all_pages_raw(client, subject_id, res)
+                fetch_all_pages_for_resolution(client, subject_id, res)
                 for res in resolutions_to_fetch
             ]
-            results_per_resolution = await asyncio.gather(*tasks)
+            results_per_resolution = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # دمج النتائج وإزالة التكرار
-        all_items_raw = []
-        for items in results_per_resolution:
-            all_items_raw.extend(items)
-
-        # إزالة التكرار بناءً على (season, episode, resolution)
+        # دمج + dedup
         seen: set[tuple] = set()
-        download_links = []
+        download_links: list[dict] = []
 
-        for item in all_items_raw:
-            key = (
-                item.get("se"),
-                item.get("ep"),
-                item.get("resolution"),
-            )
-            if key in seen:
+        for res_idx, result in enumerate(results_per_resolution):
+            if isinstance(result, Exception):
+                logger.error(
+                    f"❌ {resolutions_to_fetch[res_idx]}p exception: {result}"
+                )
                 continue
-            seen.add(key)
-            download_links.append(format_download_item(item))
+            for item in result:
+                key = (item.get("se"), item.get("ep"), item.get("resolution"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                download_links.append(format_download_item(item))
 
         if not download_links:
             raise HTTPException(status_code=404, detail="لم يتم العثور على روابط تحميل")
@@ -366,16 +369,19 @@ async def get_download_links(
             x.get("resolution") or 0,
         ))
 
-        # إحصائيات مفيدة
-        seasons = sorted(set(x["season"] for x in download_links if x.get("season")))
-        episodes_per_season: dict[int, int] = {}
+        # إحصائيات
+        seasons = sorted({x["season"] for x in download_links if x.get("season")})
+        episodes_per_season: dict = {}
+        resolutions_found: set = set()
         for x in download_links:
             s = x.get("season")
             if s:
-                episodes_per_season[s] = max(
-                    episodes_per_season.get(s, 0),
+                episodes_per_season[str(s)] = max(
+                    episodes_per_season.get(str(s), 0),
                     x.get("episode") or 0,
                 )
+            if x.get("resolution"):
+                resolutions_found.add(x["resolution"])
 
         return JSONResponse(content={
             "status": "success",
@@ -383,7 +389,7 @@ async def get_download_links(
             "total_links": len(download_links),
             "seasons_found": seasons,
             "episodes_per_season": episodes_per_season,
-            "resolutions_fetched": resolutions_to_fetch,
+            "resolutions_found": sorted(resolutions_found),
             "download_links": download_links,
         })
 
@@ -401,7 +407,7 @@ async def get_subtitles(
 ):
     """
     جلب الترجمات عبر request منفصل.
-    استخدم هذا فقط لو all_subtitles في /get_download_links كان فاضياً.
+    استخدم هذا لو all_subtitles في /get_download_links كان فاضياً.
     """
     if not subject_id.strip() or not resource_id.strip():
         raise HTTPException(status_code=400, detail="subject_id و resource_id مطلوبان")
@@ -452,12 +458,12 @@ async def health_check():
 async def root():
     return JSONResponse(content={
         "name": "MovieBox FastAPI Backend",
-        "version": "4.0",
+        "version": "5.0",
         "endpoints": {
-            "search":             "/search?query=TITLE&original_language=en&limit=8",
-            "get_download_links": "/get_download_links?subject_id=ID",
-            "get_download_links_filtered": "/get_download_links?subject_id=ID&resolution=1080",
-            "get_subtitles":      "/get_subtitles?subject_id=ID&resource_id=RID",
-            "health_check":       "/health",
+            "search":                  "/search?query=TITLE&original_language=en&limit=8",
+            "get_download_links":      "/get_download_links?subject_id=ID",
+            "get_download_links_1res": "/get_download_links?subject_id=ID&resolution=1080",
+            "get_subtitles":           "/get_subtitles?subject_id=ID&resource_id=RID",
+            "health_check":            "/health",
         },
     })
