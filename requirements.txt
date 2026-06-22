@@ -1,3 +1,4 @@
-fastapi
-uvicorn
-moviebox-api
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+moviebox-api>=1.0.0
+slowapi==0.1.9
