@@ -593,6 +593,12 @@ async def trending_content(
                 "status": "success", "total_results": 0, "results": []
             })
 
+        # Filter out items without subjectId (UI elements like "Banner", "Categories")
+        raw_items = [
+            item for item in raw_items
+            if item.get("subjectId") and str(item.get("subjectId", "")).strip()
+        ]
+
         # Filter safe mode
         if safe_mode:
             raw_items = [item for item in raw_items if not is_adult(item)]
@@ -926,34 +932,51 @@ ADULT_QUERIES = [
 async def adult_content(
     request: Request,
     type: str = Query("all", description="movie | series | all"),
-    limit: int = Query(30, ge=1, le=60, description="عدد النتائج"),
+    queries: str = Query("", description="الكلمات المفتاحية مفصولة بفاصلة (اختياري)"),
+    limit: int = Query(10, ge=1, le=60, description="عدد النتائج"),
     sort: str = Query("random", description="random | rating | newest"),
 ):
     """
-    جلب كل المحتوى +18 / للكبار فقط — أفلام، مسلسلات، أنمي، أي حاجة.
-    يبحث في كل التصنيفات: hentai, adult, xxx, erotic, nsfw, mature, porn, إلخ.
-    يعمل فقط من خلال قسم +18 في التطبيق (الوضع الغير آمن).
+    جلب محتوى +18 باستخدام الكلمات المفتاحية اللي يختارها المستخدم.
+    لو queries فاضي، يستخدم أول 5 كلمات افتراضياً.
     """
     valid_types = {"movie", "series", "all"}
     if type not in valid_types:
         raise HTTPException(status_code=400, detail="type يجب أن يكون movie أو series أو all")
 
+    # Parse selected queries
+    if queries and queries.strip():
+        selected = [q.strip() for q in queries.split(",") if q.strip()]
+    else:
+        selected = ADULT_QUERIES[:5]  # default: first 5
+
+    # Limit to max 10 keywords
+    if len(selected) > 10:
+        selected = selected[:10]
+
     try:
         all_items: list[dict] = []
         async with MovieBoxHttpClient() as client:
-            # 1. Search with all adult keywords
-            for q in ADULT_QUERIES:
+
+            # 1. Search all selected keywords CONCURRENTLY
+            async def search_keyword(q: str) -> list[dict]:
                 try:
                     searcher = Search(
                         client_session=client,
                         query=q,
                         subject_type=SubjectType.ALL,
                     )
-                    data = await searcher.get_content()
-                    items = data.get("items", [])
-                    all_items.extend(items)
+                    data = await asyncio.wait_for(
+                        searcher.get_content(), timeout=8.0
+                    )
+                    return data.get("items", [])
                 except Exception:
-                    continue
+                    return []
+
+            tasks = [search_keyword(q) for q in selected]
+            results_lists = await asyncio.gather(*tasks)
+            for items in results_lists:
+                all_items.extend(items)
 
             # 2. Also fetch from Anime tab (often contains mature content)
             try:
@@ -962,9 +985,10 @@ async def adult_content(
                     page_number=1,
                     tab_id=TabID.ANIME,
                 )
-                anime_data = await homepage.get_content()
+                anime_data = await asyncio.wait_for(
+                    homepage.get_content(), timeout=8.0
+                )
                 anime_items = anime_data.get("items", [])
-                # Filter for adult-looking anime
                 for item in anime_items:
                     if is_adult(item):
                         all_items.append(item)
@@ -976,11 +1000,11 @@ async def adult_content(
                 "status": "success", "total_results": 0, "results": []
             })
 
-        # Deduplicate
+        # Deduplicate + filter empty subjectId
         seen_ids: set[str] = set()
         unique_items: list[dict] = []
         for item in all_items:
-            sid = item.get("subjectId", "")
+            sid = str(item.get("subjectId", "") or "")
             if sid and sid not in seen_ids:
                 seen_ids.add(sid)
                 unique_items.append(item)
@@ -1018,7 +1042,7 @@ async def adult_content(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Adult content error: {type(e).__name__}")
+        logger.error(f"❌ Adult content error: {type(e).__name__}: {str(e)[:100]}")
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في جلب المحتوى.",
