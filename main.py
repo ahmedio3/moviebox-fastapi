@@ -7,6 +7,7 @@ Compatible with Watchera Android client contract.
 
 import logging
 import asyncio
+import random
 import time
 from contextlib import asynccontextmanager
 from collections import defaultdict
@@ -18,12 +19,15 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from moviebox_api.v3.core import (
+    Homepage,
+    ItemDetails,
+    SeasonDetails,
     DownloadableVideoFilesDetail,
     DownloadableCaptionFileDetails,
     Search,
 )
 from moviebox_api.v3.http_client import MovieBoxHttpClient
-from moviebox_api.v3.constants import ResolutionType, SubjectType
+from moviebox_api.v3.constants import ResolutionType, SubjectType, TabID
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -245,6 +249,28 @@ def format_download_item(item: dict) -> dict:
         "source_url": item.get("sourceUrl"),
         **sub_info,
     }
+
+
+ADULT_KEYWORDS = [
+    "+18", "xxx", "adult", "hentai", "erotica", "porn", "nsfw", "sex",
+]
+
+
+def is_adult(item: dict) -> bool:
+    """يتحقق إذا كان المحتوى غير لائق (+18, adult, hentai, xxx, إلخ)."""
+    title = (item.get("title", "") or "").lower()
+    genre_raw = item.get("genre", "")
+    if isinstance(genre_raw, str):
+        genre_list = [g.strip().lower() for g in genre_raw.split(",") if g.strip()]
+    else:
+        genre_list = [str(g).lower() for g in (genre_raw or [])]
+    for kw in ADULT_KEYWORDS:
+        if kw in title:
+            return True
+        for g in genre_list:
+            if kw in g:
+                return True
+    return False
 
 
 # ─── Core fetch ──────────────────────────────────────────────────────────────
@@ -528,6 +554,412 @@ async def get_subtitles(
         )
 
 
+# ─── Trending ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/trending")
+@limiter.limit("15/minute")
+async def trending_content(
+    request: Request,
+    tab: str = Query("all", description="all | movie | tv | anime — تبويب المحتوى"),
+    page: int = Query(1, ge=1, description="رقم الصفحة"),
+    safe_mode: bool = Query(True, description="تصفية المحتوى الغير لائق (+18, xxx, adult)"),
+    limit: int = Query(20, ge=1, le=50, description="عدد النتائج"),
+):
+    """
+    جلب المحتوى الرائج من الصفحة الرئيسية لمكتبة MovieBox — باستخدام Homepage class.
+    يدعم التبويبات: all, movie, tv, anime.
+    """
+    tab_map = {
+        "all": TabID.ALL,      # 0
+        "movie": TabID.MOVIE,  # 2
+        "tv": TabID.TV_SERIES, # 5
+        "anime": TabID.ANIME,  # 8
+    }
+    tab_id = tab_map.get(tab.lower(), TabID.ALL)
+
+    try:
+        async with MovieBoxHttpClient() as client:
+            homepage = Homepage(
+                client_session=client,
+                page_number=page,
+                tab_id=tab_id,
+            )
+            data = await homepage.get_content()
+
+        raw_items = data.get("items", [])
+        if not raw_items:
+            return JSONResponse(content={
+                "status": "success", "total_results": 0, "results": []
+            })
+
+        # Filter safe mode
+        if safe_mode:
+            raw_items = [item for item in raw_items if not is_adult(item)]
+
+        results = [format_search_item(item) for item in raw_items]
+        paginated = results[:limit]
+
+        return JSONResponse(content={
+            "status": "success",
+            "tab": tab,
+            "total_results": len(paginated),
+            "results": paginated,
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Trending error: {type(e).__name__}")
+        raise HTTPException(
+            status_code=500,
+            detail="حدث خطأ في جلب المحتوى الرائج.",
+        )
+
+
+# ─── Browse ───────────────────────────────────────────────────────────────────
+
+
+@app.get("/browse")
+@limiter.limit("15/minute")
+async def browse_content(
+    request: Request,
+    genre: str = Query(None, description="نوع المحتوى (مفصول بفواصل) مثل: action,drama"),
+    type: str = Query("all", description="movie أو series أو all"),
+    sort: str = Query("rating", description="rating أو newest أو oldest أو random"),
+    safe_mode: bool = Query(True, description="تصفية المحتوى الغير لائق (+18, xxx, adult)"),
+    limit: int = Query(20, ge=1, le=50, description="عدد النتائج"),
+):
+    """تصفح المحتوى مع فلاتر متعددة — متوافق مع MovieBoxSearchResult."""
+    valid_types = {"movie", "series", "all"}
+    valid_sorts = {"rating", "newest", "oldest", "random"}
+    if type not in valid_types:
+        raise HTTPException(status_code=400, detail="type يجب أن يكون movie أو series أو all")
+    if sort not in valid_sorts:
+        raise HTTPException(status_code=400, detail="sort يجب أن يكون rating أو newest أو oldest أو random")
+
+    try:
+        queries: list[str]
+        if genre:
+            queries = [g.strip() for g in genre.split(",") if g.strip()]
+        else:
+            queries = ["2024", "new", "popular", "action", "comedy", "drama", "top"]
+
+        all_items: list[dict] = []
+        async with MovieBoxHttpClient() as client:
+            for q in queries:
+                searcher = Search(
+                    client_session=client,
+                    query=q,
+                    subject_type=SubjectType.ALL,
+                )
+                data = await searcher.get_content()
+                items = data.get("items", [])
+                all_items.extend(items)
+
+        if not all_items:
+            return JSONResponse(content={
+                "status": "success", "total_results": 0, "results": []
+            })
+
+        seen_ids: set[str] = set()
+        unique_items: list[dict] = []
+        for item in all_items:
+            sid = item.get("subjectId", "")
+            if sid and sid not in seen_ids:
+                seen_ids.add(sid)
+                unique_items.append(item)
+
+        filtered: list[dict] = unique_items
+
+        if type == "movie":
+            filtered = [
+                item for item in filtered
+                if not ((item.get("seNum", 0) or 0) > 0 or item.get("subjectType", 0) == 2)
+            ]
+        elif type == "series":
+            filtered = [
+                item for item in filtered
+                if (item.get("seNum", 0) or 0) > 0 or item.get("subjectType", 0) == 2
+            ]
+
+        if genre:
+            genre_filter = [g.strip().lower() for g in genre.split(",") if g.strip()]
+            def _genre_match(item: dict) -> bool:
+                raw = item.get("genre", "")
+                if isinstance(raw, str):
+                    item_genres = [g.strip().lower() for g in raw.split(",") if g.strip()]
+                else:
+                    item_genres = [str(g).lower() for g in (raw or [])]
+                return any(g in item_genres for g in genre_filter)
+            filtered = [item for item in filtered if _genre_match(item)]
+
+        if safe_mode:
+            filtered = [item for item in filtered if not is_adult(item)]
+
+        results = [format_search_item(item) for item in filtered]
+
+        if sort == "rating":
+            results.sort(key=lambda x: x.get("rating", 0) or 0, reverse=True)
+        elif sort == "newest":
+            results.sort(key=lambda x: x.get("year", "") or "", reverse=True)
+        elif sort == "oldest":
+            results.sort(key=lambda x: x.get("year", "") or "")
+        elif sort == "random":
+            random.shuffle(results)
+
+        paginated = results[:limit]
+
+        return JSONResponse(content={
+            "status": "success",
+            "total_results": len(results),
+            "results": paginated,
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Browse error: {type(e).__name__}")
+        raise HTTPException(
+            status_code=500,
+            detail="حدث خطأ في تصفح المحتوى.",
+        )
+
+
+# ─── Random ───────────────────────────────────────────────────────────────────
+
+
+@app.get("/random")
+@limiter.limit("15/minute")
+async def random_content(
+    request: Request,
+    type: str = Query("all", description="movie أو series أو all"),
+    safe_mode: bool = Query(True, description="تصفية المحتوى الغير لائق"),
+    limit: int = Query(1, ge=1, le=10, description="عدد العناصر العشوائية"),
+):
+    """جلب محتوى عشوائي — متوافق مع MovieBoxSearchResult."""
+    valid_types = {"movie", "series", "all"}
+    if type not in valid_types:
+        raise HTTPException(status_code=400, detail="type يجب أن يكون movie أو series أو all")
+
+    try:
+        queries = ["2024", "2025", "new", "popular", "action", "comedy", "drama", "top"]
+        all_items: list[dict] = []
+
+        random.shuffle(queries)
+
+        async with MovieBoxHttpClient() as client:
+            for q in queries:
+                searcher = Search(
+                    client_session=client,
+                    query=q,
+                    subject_type=SubjectType.ALL,
+                )
+                data = await searcher.get_content()
+                items = data.get("items", [])
+                all_items.extend(items)
+                if len(all_items) >= 50:
+                    break
+
+        if not all_items:
+            return JSONResponse(content={
+                "status": "success", "total_results": 0, "results": []
+            })
+
+        seen_ids: set[str] = set()
+        unique_items: list[dict] = []
+        for item in all_items:
+            sid = item.get("subjectId", "")
+            if sid and sid not in seen_ids:
+                seen_ids.add(sid)
+                unique_items.append(item)
+
+        filtered: list[dict] = unique_items
+
+        if type == "movie":
+            filtered = [
+                item for item in filtered
+                if not ((item.get("seNum", 0) or 0) > 0 or item.get("subjectType", 0) == 2)
+            ]
+        elif type == "series":
+            filtered = [
+                item for item in filtered
+                if (item.get("seNum", 0) or 0) > 0 or item.get("subjectType", 0) == 2
+            ]
+
+        if safe_mode:
+            filtered = [item for item in filtered if not is_adult(item)]
+
+        random.shuffle(filtered)
+        picked = filtered[:limit]
+        results = [format_search_item(item) for item in picked]
+
+        return JSONResponse(content={
+            "status": "success",
+            "total_results": len(results),
+            "results": results,
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Random error: {type(e).__name__}")
+        raise HTTPException(
+            status_code=500,
+            detail="حدث خطأ في جلب المحتوى العشوائي.",
+        )
+
+
+# ─── Item Details ─────────────────────────────────────────────────────────────
+
+
+@app.get("/item_details")
+@limiter.limit("30/minute")
+async def item_details(
+    request: Request,
+    subject_id: str = Query(..., description="معرف المحتوى (subjectId)"),
+    include_seasons: bool = Query(False, description="جلب معلومات المواسم أيضاً"),
+):
+    """
+    جلب تفاصيل فيلم أو مسلسل معين — يستخدم ItemDetails + SeasonDetails.
+    يعيد معلومات مثل الوصف، الممثلين، التقييم، المواسم.
+    """
+    try:
+        async with MovieBoxHttpClient() as client:
+            details = ItemDetails(
+                client_session=client,
+                include_seasons=include_seasons,
+            )
+            data = await details.get_content(subject_id)
+
+        # Format the response for Android
+        item = data.get("item", data)
+        seasons_data = data.get("seasons")
+
+        result = {
+            "subject_id": item.get("subjectId", ""),
+            "title": item.get("title", ""),
+            "description": item.get("description", ""),
+            "poster": get_cover_url(item.get("cover")),
+            "rating": float(item.get("imdbRatingValue", 0) or 0),
+            "year": (item.get("releaseDate", "") or "")[:4],
+            "type": "series" if (item.get("seNum", 0) or 0) > 0 else "movie",
+            "languages": parse_languages(item.get("language", "")),
+            "country": item.get("countryName", ""),
+            "genre": (
+                [g.strip() for g in item.get("genre", "").split(",") if g.strip()]
+                if isinstance(item.get("genre"), str)
+                else list(item.get("genre") or [])
+            ),
+            "seasons_count": item.get("seNum", 0),
+            "duration_seconds": item.get("durationSeconds", 0) or 0,
+            "has_resource": bool(item.get("hasResource", False)),
+        }
+
+        if seasons_data:
+            result["seasons"] = seasons_data
+
+        return JSONResponse(content={
+            "status": "success",
+            "item": result,
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Item details error: {type(e).__name__}")
+        raise HTTPException(
+            status_code=500,
+            detail="حدث خطأ في جلب تفاصيل المحتوى.",
+        )
+
+
+# ─── Adult / +18 Content ─────────────────────────────────────────────────────
+
+
+ADULT_QUERIES = [
+    "hentai", "+18", "adult", "xxx", "erotic", "sexy",
+    "nsfw", "mature", "18+", "onlyfans",
+]
+
+
+@app.get("/adult")
+@limiter.limit("10/minute")
+async def adult_content(
+    request: Request,
+    type: str = Query("all", description="movie | series | all"),
+    limit: int = Query(20, ge=1, le=40, description="عدد النتائج"),
+):
+    """
+    جلب محتوى +18 / Hentai / Adult — المحتوى الغير لائق.
+    يعمل فقط عند إيقاف الوضع الآمن في التطبيق.
+    """
+    valid_types = {"movie", "series", "all"}
+    if type not in valid_types:
+        raise HTTPException(status_code=400, detail="type يجب أن يكون movie أو series أو all")
+
+    try:
+        all_items: list[dict] = []
+        async with MovieBoxHttpClient() as client:
+            for q in ADULT_QUERIES:
+                try:
+                    searcher = Search(
+                        client_session=client,
+                        query=q,
+                        subject_type=SubjectType.ALL,
+                    )
+                    data = await searcher.get_content()
+                    items = data.get("items", [])
+                    all_items.extend(items)
+                except Exception:
+                    continue
+
+        if not all_items:
+            return JSONResponse(content={
+                "status": "success", "total_results": 0, "results": []
+            })
+
+        # Deduplicate
+        seen_ids: set[str] = set()
+        unique_items: list[dict] = []
+        for item in all_items:
+            sid = item.get("subjectId", "")
+            if sid and sid not in seen_ids:
+                seen_ids.add(sid)
+                unique_items.append(item)
+
+        # Filter by type
+        if type == "movie":
+            unique_items = [
+                item for item in unique_items
+                if not ((item.get("seNum", 0) or 0) > 0 or item.get("subjectType", 0) == 2)
+            ]
+        elif type == "series":
+            unique_items = [
+                item for item in unique_items
+                if (item.get("seNum", 0) or 0) > 0 or item.get("subjectType", 0) == 2
+            ]
+
+        results = [format_search_item(item) for item in unique_items]
+        random.shuffle(results)
+        paginated = results[:limit]
+
+        return JSONResponse(content={
+            "status": "success",
+            "total_results": len(results),
+            "results": paginated,
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Adult content error: {type(e).__name__}")
+        raise HTTPException(
+            status_code=500,
+            detail="حدث خطأ في جلب المحتوى.",
+        )
+
+
 @app.get("/health")
 async def health_check():
     return JSONResponse(content={"status": "healthy", "service": "watchera-moviebox"})
@@ -543,11 +975,21 @@ async def root():
             "get_download_links":      "/get_download_links?subject_id=ID",
             "get_download_links_1res": "/get_download_links?subject_id=ID&resolution=1080",
             "get_subtitles":           "/get_subtitles?subject_id=ID&resource_id=RID",
+            "trending":                "/trending?tab=movie&page=1&safe_mode=true&limit=20",
+            "browse":                  "/browse?genre=action,drama&type=all&sort=rating&safe_mode=true&limit=20",
+            "random":                  "/random?type=all&safe_mode=true&limit=1",
+            "item_details":            "/item_details?subject_id=ID&include_seasons=true",
+            "adult":                   "/adult?type=all&limit=20",
             "health":                  "/health",
         },
         "rate_limits": {
             "search": "30/minute",
             "get_download_links": "20/minute",
             "get_subtitles": "60/minute",
+            "trending": "15/minute",
+            "browse": "15/minute",
+            "random": "15/minute",
+            "item_details": "30/minute",
+            "adult": "10/minute",
         },
     })
