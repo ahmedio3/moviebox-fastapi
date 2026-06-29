@@ -1048,10 +1048,20 @@ async def adult_content(
             detail="حدث خطأ في جلب المحتوى.",
         )
 
+@app.get("/adult_keywords")
+async def adult_keywords():
+    """إرجاع جميع الكلمات المفتاحية المتاحة لقسم +18."""
+    return JSONResponse(content={
+        "status": "success",
+        "keywords": ADULT_QUERIES,
+        "total": len(ADULT_QUERIES),
+    })
+
 
 @app.get("/health")
 async def health_check():
     return JSONResponse(content={"status": "healthy", "service": "watchera-moviebox"})
+
 
 
 @app.get("/")
@@ -1068,7 +1078,8 @@ async def root():
             "browse":                  "/browse?genre=action,drama&type=all&sort=rating&safe_mode=true&limit=20",
             "random":                  "/random?type=all&safe_mode=true&limit=1",
             "item_details":            "/item_details?subject_id=ID&include_seasons=true",
-            "adult":                   "/adult?type=all&limit=20",
+            "adult":                   "/adult?type=all&queries=hentai,xxx&limit=10",
+            "adult_keywords":          "/adult_keywords",
             "health":                  "/health",
         },
         "rate_limits": {
