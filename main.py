@@ -878,8 +878,25 @@ async def item_details(
 
 
 ADULT_QUERIES = [
-    "hentai", "+18", "adult", "xxx", "erotic", "sexy",
-    "nsfw", "mature", "18+", "onlyfans",
+    # Hentai & Anime Adult
+    "hentai", "ecchi", "yaoi", "yuri", "shota", "lolicon",
+    "tentacle", "doujinshi", "anime adult",
+    # Explicit - Movies & Series
+    "xxx", "adult movie", "adult film", "erotic film", "erotic movie",
+    "nsfw", "mature content", "18+", "onlyfans", "porn",
+    "sex scene", "nude", "nudity", "explicit",
+    # Softcore / Romance +
+    "erotic", "sexy", "sensual", "steamy", "seduction",
+    "adult comedy", "adult animation", "adult drama",
+    # International
+    "porno", "film érotique", "film erotico", "erotik film",
+    "adult series", "adult tv", "mature anime",
+    # Specific categories
+    "bondage", "bdsm", "fetish", "lingerie",
+    "strip", "striptease", "burlesque",
+    "taboo", "forbidden love", "illicit",
+    # Horror + Erotic mixed
+    "vampire erotic", "horror erotic",
 ]
 
 
@@ -888,11 +905,13 @@ ADULT_QUERIES = [
 async def adult_content(
     request: Request,
     type: str = Query("all", description="movie | series | all"),
-    limit: int = Query(20, ge=1, le=40, description="عدد النتائج"),
+    limit: int = Query(30, ge=1, le=60, description="عدد النتائج"),
+    sort: str = Query("random", description="random | rating | newest"),
 ):
     """
-    جلب محتوى +18 / Hentai / Adult — المحتوى الغير لائق.
-    يعمل فقط عند إيقاف الوضع الآمن في التطبيق.
+    جلب كل المحتوى +18 / للكبار فقط — أفلام، مسلسلات، أنمي، أي حاجة.
+    يبحث في كل التصنيفات: hentai, adult, xxx, erotic, nsfw, mature, porn, إلخ.
+    يعمل فقط من خلال قسم +18 في التطبيق (الوضع الغير آمن).
     """
     valid_types = {"movie", "series", "all"}
     if type not in valid_types:
@@ -901,6 +920,7 @@ async def adult_content(
     try:
         all_items: list[dict] = []
         async with MovieBoxHttpClient() as client:
+            # 1. Search with all adult keywords
             for q in ADULT_QUERIES:
                 try:
                     searcher = Search(
@@ -913,6 +933,22 @@ async def adult_content(
                     all_items.extend(items)
                 except Exception:
                     continue
+
+            # 2. Also fetch from Anime tab (often contains mature content)
+            try:
+                homepage = Homepage(
+                    client_session=client,
+                    page_number=1,
+                    tab_id=TabID.ANIME,
+                )
+                anime_data = await homepage.get_content()
+                anime_items = anime_data.get("items", [])
+                # Filter for adult-looking anime
+                for item in anime_items:
+                    if is_adult(item):
+                        all_items.append(item)
+            except Exception:
+                pass
 
         if not all_items:
             return JSONResponse(content={
@@ -941,7 +977,15 @@ async def adult_content(
             ]
 
         results = [format_search_item(item) for item in unique_items]
-        random.shuffle(results)
+
+        # Sort
+        if sort == "rating":
+            results.sort(key=lambda x: x.get("rating", 0) or 0, reverse=True)
+        elif sort == "newest":
+            results.sort(key=lambda x: x.get("year", "") or "", reverse=True)
+        else:  # random
+            random.shuffle(results)
+
         paginated = results[:limit]
 
         return JSONResponse(content={
