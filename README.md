@@ -4,6 +4,8 @@
 
 **Backend API powering the Watchera Android app — search, download links & subtitles from MovieBox**
 
+[trigger redeploy]
+
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.0-009688.svg)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://python.org)
 [![Deploy](https://img.shields.io/badge/Vercel-Deploy-black.svg)](https://vercel.com)
