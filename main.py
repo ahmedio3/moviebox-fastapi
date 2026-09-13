@@ -1,9 +1,9 @@
 """
 تطبيق FastAPI للحصول على روابط التحميل والبحث والترجمة من مكتبة moviebox-api v3
 جاهز للنشر على Vercel
-متوافق مع moviebox-api >= 0.6.0
 
 Compatible with Watchera Android client contract.
+متوافق مع moviebox-api >= 0.5.3
 """
 
 import logging
@@ -43,14 +43,14 @@ limiter = Limiter(key_func=get_remote_address)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Watchera MovieBox API started (v0.6.0+)")
+    logger.info("🚀 Watchera MovieBox API started")
     yield
     logger.info("🛑 Shutting down")
 
 
 app = FastAPI(
     title="MovieBox FastAPI Backend for Watchera",
-    version="8.1",
+    version="8.2",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -275,17 +275,13 @@ def is_adult(item: dict) -> bool:
 
 
 # ─── Core fetch ────────────────────────────────────────────────────────────
-# تحديث: معالجة كاملة لتوافق moviebox-api v0.6.0
 
 async def fetch_all_pages_for_resolution(
     client: MovieBoxHttpClient,
     subject_id: str,
     resolution: int,
 ) -> list[dict]:
-    """
-    يجيب كل الحلقات لـ resolution معين مع استخراج الـ captions كمان.
-    متوافق مع v0.6.0 — يتعامل مع تغييرات في Response structure.
-    """
+    """يجيب كل الحلقات لـ resolution معين مع استخراج الـ captions كمان."""
     for per_page_val in PER_PAGE_OPTIONS:
         items: list[dict] = []
         try:
@@ -299,59 +295,35 @@ async def fetch_all_pages_for_resolution(
             page_count = 0
             async for page_model in dl.get_content_model_all(subject_id):
                 page_count += 1
-                
-                # تعامل مع كل نسخة من النموذج
-                items_list = getattr(page_model, 'list', None) or getattr(page_model, 'items', [])
-                if not items_list:
-                    logger.warning(f"⚠️ {resolution}p page {page_count}: empty items list")
-                    continue
-                
-                for video_file in items_list:
-                    # معالجة attributes جديدة في v0.6.0
-                    try:
-                        ext_caps = getattr(video_file, 'ext_captions', None) or \
-                                  getattr(video_file, 'extCaptions', None) or \
-                                  getattr(video_file, 'captions', []) or []
-                        
-                        resource_link = getattr(video_file, 'resource_link', None) or \
-                                       getattr(video_file, 'resourceLink', None) or \
-                                       getattr(video_file, 'url', None) or \
-                                       getattr(video_file, 'direct_url', None)
-                        
-                        if not resource_link:
-                            logger.debug(f"⚠️ Skipping video: no resource_link found")
-                            continue
-                        
-                        item_dict = {
-                            "resourceLink": str(resource_link) if resource_link else None,
-                            "resolution": int(getattr(video_file, 'resolution', 0) or 0),
-                            "size": str(getattr(video_file, 'size', None) or None) if getattr(video_file, 'size', None) else None,
-                            "se": int(getattr(video_file, 'season', 0) or 0),
-                            "ep": int(getattr(video_file, 'episode', 0) or 0),
-                            "resourceId": str(getattr(video_file, 'resource_id', None) or None) if getattr(video_file, 'resource_id', None) else None,
-                            "codecName": getattr(video_file, 'codec_name', None) or getattr(video_file, 'codecName', None),
-                            "duration": int(getattr(video_file, 'duration', 0) or 0),
-                            "sourceUrl": str(getattr(video_file, 'source_url', "") or "") or None,
-                            # ── الترجمات المضمنة مع الملف (إن وجدت) ──
-                            "extCaptions": [
-                                {
-                                    "id": getattr(cap, "id", ""),
-                                    "lan": getattr(cap, "lan", "") or getattr(cap, "language_code", ""),
-                                    "lanName": getattr(cap, "lan_name", "") or getattr(cap, "language_name", ""),
-                                    "url": str(getattr(cap, "url", "") or ""),
-                                    "size": int(getattr(cap, "size", 0) or 0),
-                                    "delay": int(getattr(cap, "delay", 0) or 0),
-                                }
-                                for cap in ext_caps
-                            ],
-                        }
-                        items.append(item_dict)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error processing video file: {e}")
-                        continue
+                for video_file in page_model.list:
+                    ext_caps = video_file.ext_captions or []
+                    item_dict = {
+                        "resourceLink": str(video_file.resource_link) if video_file.resource_link else None,
+                        "resolution": int(video_file.resolution) if video_file.resolution else 0,
+                        "size": str(video_file.size) if video_file.size else None,
+                        "se": int(video_file.season) if video_file.season else 0,
+                        "ep": int(video_file.episode) if video_file.episode else 0,
+                        "resourceId": str(video_file.resource_id) if video_file.resource_id else None,
+                        "codecName": getattr(video_file, "codec_name", None) or getattr(video_file, "codecName", None),
+                        "duration": int(getattr(video_file, "duration", 0) or 0),
+                        "sourceUrl": str(getattr(video_file, "source_url", "") or "") or None,
+                        # ── الترجمات المضمنة مع الملف (إن وجدت) ──
+                        "extCaptions": [
+                            {
+                                "id": getattr(cap, "id", ""),
+                                "lan": getattr(cap, "lan", "") or "",
+                                "lanName": getattr(cap, "lan_name", "") or "",
+                                "url": str(getattr(cap, "url", "") or ""),
+                                "size": int(getattr(cap, "size", 0) or 0),
+                                "delay": int(getattr(cap, "delay", 0) or 0),
+                            }
+                            for cap in ext_caps
+                        ],
+                    }
+                    items.append(item_dict)
 
                 logger.info(
-                    f"📄 {resolution}p — page {page_count}: {len(items_list)} items processed"
+                    f"📄 {resolution}p — page {page_count}: {len(page_model.list)} items"
                 )
 
             logger.info(f"✅ {resolution}p done: {len(items)} links in {page_count} pages")
@@ -372,7 +344,7 @@ async def fetch_all_pages_for_resolution(
     return []
 
 
-# ─── Endpoints ────────────────────────────────────────────────────────────
+# ─── Endpoints ─────────────────────────────────────────────────────────────
 
 @app.get("/search")
 @limiter.limit("30/minute")
@@ -417,7 +389,7 @@ async def search_content(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Search error: {type(e).__name__}: {e}")
+        logger.error(f"❌ Search error: {type(e).__name__}")
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في البحث. حاول مرة أخرى.",
@@ -437,7 +409,6 @@ async def get_download_links(
     """
     جلب كل روابط التحميل — مع الترجمات المضمنة (subtitles_available,
     has_arabic_subtitle, arabic_subtitle_url, all_subtitles).
-    متوافق مع v0.6.0+
     """
     if not subject_id or not subject_id.strip():
         raise HTTPException(status_code=400, detail="subject_id مطلوب")
@@ -474,13 +445,12 @@ async def get_download_links(
                 # لو الـ ext_captions فاضية، نعمل fallback للـ get_subtitles
                 if not formatted["subtitles_available"] and formatted["resource_id"]:
                     try:
-                        async with MovieBoxHttpClient() as client2:
-                            cap_fetcher = DownloadableCaptionFileDetails(client_session=client2)
-                            cap_data = await cap_fetcher.get_content(subject_id, formatted["resource_id"])
-                            raw_caps = cap_data.get("extCaptions", []) or cap_data.get("captions", [])
-                            if raw_caps:
-                                sub_info = build_subtitle_summary(raw_caps)
-                                formatted.update(sub_info)
+                        cap_fetcher = DownloadableCaptionFileDetails(client_session=client)
+                        cap_data = await cap_fetcher.get_content(subject_id, formatted["resource_id"])
+                        raw_caps = cap_data.get("extCaptions", [])
+                        if raw_caps:
+                            sub_info = build_subtitle_summary(raw_caps)
+                            formatted.update(sub_info)
                     except Exception as e:
                         logger.warning(f"⚠️ subtitle fallback failed for {formatted['resource_id']}: {e}")
                 key = (
@@ -533,7 +503,7 @@ async def get_download_links(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Download links error: {type(e).__name__}: {e}")
+        logger.error(f"❌ Download links error: {type(e).__name__}")
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في جلب الروابط. حاول مرة أخرى.",
@@ -549,7 +519,6 @@ async def get_subtitles(
 ):
     """
     جلب الترجمات لحلقة معينة عبر resource_id — endpoint احتياطي.
-    متوافق مع v0.6.0+
     """
     if not subject_id.strip() or not resource_id.strip():
         raise HTTPException(
@@ -560,7 +529,7 @@ async def get_subtitles(
             caption_fetcher = DownloadableCaptionFileDetails(client_session=client)
             data = await caption_fetcher.get_content(subject_id, resource_id)
 
-        raw_captions = data.get("extCaptions", []) or data.get("captions", [])
+        raw_captions = data.get("extCaptions", [])
         sub_info = build_subtitle_summary(raw_captions)
         arabic_sub = next(
             (s for s in sub_info["all_subtitles"] if is_arabic_caption(s)), None
@@ -579,7 +548,7 @@ async def get_subtitles(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Subtitles error: {type(e).__name__}: {e}")
+        logger.error(f"❌ Subtitles error: {type(e).__name__}")
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في جلب الترجمات.",
@@ -648,7 +617,7 @@ async def trending_content(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Trending error: {type(e).__name__}: {e}")
+        logger.error(f"❌ Trending error: {type(e).__name__}")
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في جلب المحتوى الرائج.",
@@ -757,7 +726,7 @@ async def browse_content(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Browse error: {type(e).__name__}: {e}")
+        logger.error(f"❌ Browse error: {type(e).__name__}")
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في تصفح المحتوى.",
@@ -841,7 +810,7 @@ async def random_content(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Random error: {type(e).__name__}: {e}")
+        logger.error(f"❌ Random error: {type(e).__name__}")
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في جلب المحتوى العشوائي.",
@@ -905,7 +874,7 @@ async def item_details(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Item details error: {type(e).__name__}: {e}")
+        logger.error(f"❌ Item details error: {type(e).__name__}")
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في جلب تفاصيل المحتوى.",
@@ -1100,8 +1069,7 @@ async def health_check():
 async def root():
     return JSONResponse(content={
         "name": "MovieBox FastAPI Backend for Watchera",
-        "version": "8.1",
-        "moviebox_api_version": "0.6.0+",
+        "version": "8.2",
         "endpoints": {
             "search":                  "/search?query=TITLE&original_language=en&limit=8",
             "get_download_links":      "/get_download_links?subject_id=ID",
@@ -1125,5 +1093,4 @@ async def root():
             "item_details": "30/minute",
             "adult": "10/minute",
         },
-        "note": "Updated for moviebox-api v0.6.0+ compatibility"
     })
