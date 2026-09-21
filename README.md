@@ -2,7 +2,7 @@
 
 # 🎬 MovieBox FastAPI Backend
 
-**Backend API powering the Watchera Android app — search, download links & subtitles from MovieBox**
+**Backend API  powering the Watchera Android app — search, download links & subtitles from MovieBox**
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.0-009688.svg)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://python.org)
