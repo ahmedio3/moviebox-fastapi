@@ -219,10 +219,10 @@ Exceeded limits return HTTP `429`:
 |-----------|-----------|---------|
 | **Framework** | FastAPI | 0.115.0 |
 | **ASGI Server** | Uvicorn | 0.30.6 |
-| **MovieBox SDK** | moviebox-api | ≥0.5.0 |
+| **MovieBox SDK** | moviebox-api | 0.5.3 (v3) |
 | **Rate Limiting** | slowapi | 0.1.9 |
 | **Runtime** | Python | 3.12+ |
-| **Deployment** | Vercel (Serverless) | — |
+| **Deployment** | Wispbyte (24/7 Container) | — |
 
 ---
 
@@ -306,9 +306,9 @@ open http://localhost:8000/docs
 
 ```
 moviebox-fastapi/
-├── main.py              # Entire application (553 lines)
+├── main.py              # Entire application
 ├── requirements.txt     # Python dependencies
-├── vercel.json          # Vercel deployment config
+├── .python-version      # Python runtime version (3.12)
 └── README.md            # This file
 ```
 

@@ -1,4 +1,4 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-moviebox-api>=0.5.0
+moviebox-api @ git+https://github.com/adesinaisaiah100/moviebox-api.git
 slowapi==0.1.9

@@ -1,6 +1,5 @@
 """
 تطبيق FastAPI للحصول على روابط التحميل والبحث والترجمة من مكتبة moviebox-api v3
-جاهز للنشر على Vercel
 
 Compatible with Watchera Android client contract.
 """
@@ -1093,3 +1092,12 @@ async def root():
             "adult": "10/minute",
         },
     })
+
+
+if __name__ == "__main__":
+    import os
+    import uvicorn
+
+    port = int(os.environ.get("PORT") or os.environ.get("SERVER_PORT") or 8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
