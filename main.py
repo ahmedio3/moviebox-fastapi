@@ -1096,8 +1096,26 @@ async def root():
 
 if __name__ == "__main__":
     import os
+    import sys
     import uvicorn
 
-    port = int(os.environ.get("PORT") or os.environ.get("SERVER_PORT") or 8000)
+    port = None
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == "--port" and i < len(sys.argv):
+            port = int(sys.argv[i + 1])
+            break
+        elif arg.isdigit():
+            port = int(arg)
+            break
+
+    if not port:
+        port = int(
+            os.environ.get("SERVER_PORT")
+            or os.environ.get("PORT")
+            or os.environ.get("P_SERVER_PORT")
+            or 10622
+        )
+
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
 
