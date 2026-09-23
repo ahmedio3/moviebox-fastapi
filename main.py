@@ -37,13 +37,58 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 
 
+# ─── Auth Token Manager ──────────────────────────────────────────────────────
+
+_cached_token: str | None = None
+_token_lock = asyncio.Lock()
+
+
+async def _refresh_token(client: MovieBoxHttpClient) -> str | None:
+    global _cached_token
+    try:
+        hp = Homepage(client_session=client)
+        await hp.get_content()
+        if client._runtime_token:
+            _cached_token = client._runtime_token
+            logger.info("🔑 Fresh MovieBox auth token acquired")
+            return _cached_token
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to acquire MovieBox auth token: {e}")
+    return None
+
+
+@asynccontextmanager
+async def get_client():
+    global _cached_token
+    async with MovieBoxHttpClient() as client:
+        if _cached_token:
+            client._runtime_token = _cached_token
+        else:
+            async with _token_lock:
+                if not _cached_token:
+                    await _refresh_token(client)
+                else:
+                    client._runtime_token = _cached_token
+
+        yield client
+
+        if client._runtime_token and client._runtime_token != _cached_token:
+            _cached_token = client._runtime_token
+
+
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Watchera MovieBox API started")
+    try:
+        async with MovieBoxHttpClient() as client:
+            await _refresh_token(client)
+    except Exception as e:
+        logger.warning(f"⚠️ Startup token initialization skipped: {e}")
     yield
     logger.info("🛑 Shutting down")
+
 
 
 app = FastAPI(
@@ -357,7 +402,7 @@ async def search_content(
     if not query:
         raise HTTPException(status_code=400, detail="query لا يمكن أن يكون فارغاً")
     try:
-        async with MovieBoxHttpClient() as client:
+        async with get_client() as client:
             searcher = Search(
                 client_session=client,
                 query=query,
@@ -420,7 +465,7 @@ async def get_download_links(
     resolutions_to_fetch = [resolution] if resolution is not None else ALL_RESOLUTIONS
 
     try:
-        async with MovieBoxHttpClient() as client:
+        async with get_client() as client:
             tasks = [
                 fetch_all_pages_for_resolution(client, subject_id, res)
                 for res in resolutions_to_fetch
@@ -523,7 +568,7 @@ async def get_subtitles(
             status_code=400, detail="subject_id و resource_id مطلوبان"
         )
     try:
-        async with MovieBoxHttpClient() as client:
+        async with get_client() as client:
             caption_fetcher = DownloadableCaptionFileDetails(client_session=client)
             data = await caption_fetcher.get_content(subject_id, resource_id)
 
@@ -570,20 +615,18 @@ async def trending_content(
     يدعم التبويبات: all, movie, tv, anime.
     """
     tab_map = {
-        "all": TabID.ALL,      # 0
-        "movie": TabID.MOVIE,  # 2
-        "tv": TabID.TV_SERIES, # 5
-        "anime": TabID.ANIME,  # 8
+        "all": 0,
+        "movie": 2,
+        "tv": 5,
+        "anime": 8,
     }
-    tab_id = tab_map.get(tab.lower(), TabID.ALL)
+    tab_id = tab_map.get(tab.lower(), 0)
 
     try:
-        async with MovieBoxHttpClient() as client:
-            homepage = Homepage(
-                client_session=client,
-                page_number=page,
-                tab_id=tab_id,
-            )
+        async with get_client() as client:
+            homepage = Homepage(client_session=client)
+            homepage._page_number = page
+            homepage._tab_id = tab_id
             data = await homepage.get_content()
 
         raw_items = data.get("items", [])
@@ -592,11 +635,24 @@ async def trending_content(
                 "status": "success", "total_results": 0, "results": []
             })
 
-        # Filter out items without subjectId (UI elements like "Banner", "Categories")
-        raw_items = [
-            item for item in raw_items
-            if item.get("subjectId") and str(item.get("subjectId", "")).strip()
-        ]
+        # Extract items directly or from section subjects
+        flat_items: list[dict] = []
+        for it in raw_items:
+            if it.get("subjectId") and str(it.get("subjectId", "")).strip():
+                flat_items.append(it)
+            for sub in it.get("subjects", []) or []:
+                if sub.get("subjectId") and str(sub.get("subjectId", "")).strip():
+                    flat_items.append(sub)
+
+        # Deduplicate
+        seen_ids: set[str] = set()
+        deduped: list[dict] = []
+        for it in flat_items:
+            sid = str(it.get("subjectId"))
+            if sid not in seen_ids:
+                seen_ids.add(sid)
+                deduped.append(it)
+        raw_items = deduped
 
         # Filter safe mode
         if safe_mode:
@@ -651,7 +707,7 @@ async def browse_content(
             queries = ["2024", "new", "popular", "action", "comedy", "drama", "top"]
 
         all_items: list[dict] = []
-        async with MovieBoxHttpClient() as client:
+        async with get_client() as client:
             for q in queries:
                 searcher = Search(
                     client_session=client,
@@ -753,7 +809,7 @@ async def random_content(
 
         random.shuffle(queries)
 
-        async with MovieBoxHttpClient() as client:
+        async with get_client() as client:
             for q in queries:
                 searcher = Search(
                     client_session=client,
@@ -830,7 +886,7 @@ async def item_details(
     يعيد معلومات مثل الوصف، الممثلين، التقييم، المواسم.
     """
     try:
-        async with MovieBoxHttpClient() as client:
+        async with get_client() as client:
             details = ItemDetails(
                 client_session=client,
                 include_seasons=include_seasons,
@@ -843,7 +899,7 @@ async def item_details(
 
         result = {
             "subject_id": item.get("subjectId", ""),
-            "title": item.get("title", ""),
+            "title": item.get("title") or item.get("postTitle") or "",
             "description": item.get("description", ""),
             "poster": get_cover_url(item.get("cover")),
             "rating": float(item.get("imdbRatingValue", 0) or 0),
@@ -955,7 +1011,7 @@ async def adult_content(
 
     try:
         all_items: list[dict] = []
-        async with MovieBoxHttpClient() as client:
+        async with get_client() as client:
 
             # 1. Search all selected keywords CONCURRENTLY
             async def search_keyword(q: str) -> list[dict]:
@@ -979,11 +1035,9 @@ async def adult_content(
 
             # 2. Also fetch from Anime tab (often contains mature content)
             try:
-                homepage = Homepage(
-                    client_session=client,
-                    page_number=1,
-                    tab_id=TabID.ANIME,
-                )
+                homepage = Homepage(client_session=client)
+                homepage._page_number = 1
+                homepage._tab_id = 8
                 anime_data = await asyncio.wait_for(
                     homepage.get_content(), timeout=8.0
                 )
