@@ -26,6 +26,7 @@ A lightweight, stateless REST API that acts as a proxy/adapter between the **[Wa
 | `GET /health` | — | Health check |
 | `GET /search` | 30/min | Search for movies & TV series |
 | `GET /get_download_links` | 20/min | Get streaming URLs with embedded subtitles |
+| `GET /get_stream` | 30/min | Get direct DASH stream URL, Cookie & Headers for ExoPlayer |
 | `GET /get_subtitles` | 60/min | Get subtitle files (fallback endpoint) |
 
 ---

@@ -6,6 +6,7 @@ Compatible with Watchera Android client contract.
 
 import logging
 import asyncio
+import base64
 import random
 import time
 from contextlib import asynccontextmanager
@@ -27,6 +28,7 @@ from moviebox_api.v3.core import (
 )
 from moviebox_api.v3.http_client import MovieBoxHttpClient
 from moviebox_api.v3.constants import ResolutionType, SubjectType, TabID
+from moviebox_api.v3.urls import PLAY_INFO_PATH, SEASON_INFO_PATH
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -115,7 +117,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 
 ALL_RESOLUTIONS = [360, 480, 720, 1080]
-PER_PAGE_OPTIONS = [100, 20]
+PER_PAGE_OPTIONS = [20]
 
 TMDB_LANG_MAP: dict[str, list[str]] = {
     "en": ["english"], "de": ["german", "deutsch"], "ja": ["japanese"],
@@ -276,21 +278,97 @@ def format_search_item(item: dict) -> dict:
     }
 
 
+DUMMY_VIDEO_HASH = "b164fbfb4347792950bdfbfb563d39d9"
+
+
+def is_dummy_video(url: str | None) -> bool:
+    if not url:
+        return False
+    return DUMMY_VIDEO_HASH in str(url)
+
+
+def extract_dash_from_cookie(sign_cookie: str) -> tuple[str | None, str | None]:
+    """
+    Extracts the DASH manifest URL (index.mpd) and the Edge-Cache-Cookie header value.
+    """
+    if not sign_cookie or "urlprefix=" not in sign_cookie:
+        return None, None
+    try:
+        prefix_b64 = sign_cookie.split("urlprefix=")[1].split(":")[0]
+        padding = (4 - len(prefix_b64) % 4) % 4
+        prefix = base64.b64decode(prefix_b64 + "=" * padding).decode("utf-8")
+        if not prefix.endswith("/"):
+            prefix += "/"
+        manifest_url = f"{prefix}index.mpd"
+        return manifest_url, sign_cookie.strip()
+    except Exception as e:
+        logger.error(f"Error parsing sign_cookie: {e}")
+        return None, None
+
+
+async def resolve_stream_for_episode(
+    client: MovieBoxHttpClient, subject_id: str, season: int = 0, episode: int = 0
+) -> dict | None:
+    """
+    Queries /wefeed-mobile-bff/subject-api/play-info and extracts the real DASH stream and signed cookie.
+    """
+    try:
+        data = await client.get_from_api(
+            PLAY_INFO_PATH,
+            params={"subjectId": subject_id, "se": season, "ep": episode},
+            include_play_mode=True,
+        )
+        streams = data.get("streams", []) or []
+        for st in streams:
+            sign_cookie = st.get("signCookie", "")
+            manifest_url, cookie_val = extract_dash_from_cookie(sign_cookie)
+            if manifest_url:
+                resolutions = [
+                    int(r.strip())
+                    for r in st.get("resolutions", "").split(",")
+                    if r.strip().isdigit()
+                ]
+                return {
+                    "manifest_url": manifest_url,
+                    "cookie": cookie_val,
+                    "headers": {
+                        "Cookie": cookie_val,
+                        "User-Agent": "Mozilla/5.0",
+                    },
+                    "resolutions": resolutions,
+                    "codec": st.get("codecName"),
+                    "duration": int(st.get("duration", 0) or 0),
+                    "size": int(st.get("size", 0) or 0),
+                }
+    except Exception as e:
+        logger.warning(
+            f"⚠️ Failed to resolve play-info for {subject_id} S{season}E{episode}: {e}"
+        )
+    return None
+
+
 def format_download_item(item: dict) -> dict:
     """صيغة رابط التحميل الواحد - متوافقة مع VideoFile في Android."""
     raw_captions = item.get("extCaptions", []) or []
     sub_info = build_subtitle_summary(raw_captions)
 
+    url_val = item.get("resourceLink") or item.get("url")
     return {
-        "url": item.get("resourceLink") or item.get("url"),
+        "url": url_val,
         "resolution": int(item.get("resolution") or 0),
         "size": item.get("size"),
         "season": int(item.get("se") or item.get("season") or 0),
         "episode": int(item.get("ep") or item.get("episode") or 0),
         "resource_id": item.get("resourceId") or item.get("resource_id") or "",
-        "codec": item.get("codecName"),
+        "codec": item.get("codecName") or item.get("codec"),
         "duration": int(item.get("duration") or 0),
         "source_url": item.get("sourceUrl"),
+        "stream_type": item.get(
+            "stream_type", "dash" if (url_val and ".mpd" in url_val) else "mp4"
+        ),
+        "cookie": item.get("cookie"),
+        "headers": item.get("headers"),
+        "resolutions_available": item.get("resolutions_available"),
         **sub_info,
     }
 
@@ -465,6 +543,9 @@ async def get_download_links(
     resolutions_to_fetch = [resolution] if resolution is not None else ALL_RESOLUTIONS
 
     try:
+        seen: set[tuple] = set()
+        download_links: list[dict] = []
+
         async with get_client() as client:
             tasks = [
                 fetch_all_pages_for_resolution(client, subject_id, res)
@@ -474,41 +555,102 @@ async def get_download_links(
                 *tasks, return_exceptions=True
             )
 
-        seen: set[tuple] = set()
-        download_links: list[dict] = []
-
-        for res_idx, result in enumerate(results_per_resolution):
-            if isinstance(result, Exception):
-                logger.error(
-                    f"❌ {resolutions_to_fetch[res_idx]}p exception: {result}"
-                )
-                continue
-            for raw_item in result:
-                formatted = format_download_item(raw_item)
-                # لو الـ ext_captions فاضية، نعمل fallback للـ get_subtitles
-                if not formatted["subtitles_available"] and formatted["resource_id"]:
-                    try:
-                        cap_fetcher = DownloadableCaptionFileDetails(client_session=client)
-                        cap_data = await cap_fetcher.get_content(subject_id, formatted["resource_id"])
-                        raw_caps = cap_data.get("extCaptions", [])
-                        if raw_caps:
-                            sub_info = build_subtitle_summary(raw_caps)
-                            formatted.update(sub_info)
-                    except Exception as e:
-                        logger.warning(f"⚠️ subtitle fallback failed for {formatted['resource_id']}: {e}")
-                key = (
-                    formatted.get("season"),
-                    formatted.get("episode"),
-                    formatted.get("resolution"),
-                )
-                if key in seen:
+            for res_idx, result in enumerate(results_per_resolution):
+                if isinstance(result, Exception):
+                    logger.error(
+                        f"❌ {resolutions_to_fetch[res_idx]}p exception: {result}"
+                    )
                     continue
-                seen.add(key)
-                download_links.append(formatted)
+                for raw_item in result:
+                    formatted = format_download_item(raw_item)
+                    # لو الـ ext_captions فاضية، نعمل fallback للـ get_subtitles
+                    if not formatted["subtitles_available"] and formatted["resource_id"]:
+                        try:
+                            cap_fetcher = DownloadableCaptionFileDetails(client_session=client)
+                            cap_data = await cap_fetcher.get_content(subject_id, formatted["resource_id"])
+                            raw_caps = cap_data.get("extCaptions", [])
+                            if raw_caps:
+                                sub_info = build_subtitle_summary(raw_caps)
+                                formatted.update(sub_info)
+                        except Exception as e:
+                            logger.warning(f"⚠️ subtitle fallback failed for {formatted['resource_id']}: {e}")
+                    key = (
+                        formatted.get("season"),
+                        formatted.get("episode"),
+                        formatted.get("resolution"),
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    download_links.append(formatted)
+
+            # ── حل وتحديث روابط البث الحقيقية (DASH) وإزالة الفيديو الوهمي ──
+            episodes_to_resolve = set()
+            for item in download_links:
+                if is_dummy_video(item.get("url")) or not item.get("url"):
+                    episodes_to_resolve.add((item.get("season", 0) or 0, item.get("episode", 0) or 0))
+
+            if not download_links:
+                episodes_to_resolve.add((0, 0))
+
+            if episodes_to_resolve:
+                ep_tasks = [
+                    resolve_stream_for_episode(client, subject_id, se, ep)
+                    for se, ep in episodes_to_resolve
+                ]
+                resolved_list = await asyncio.gather(*ep_tasks, return_exceptions=True)
+                stream_map = {}
+                for (se, ep), res_data in zip(episodes_to_resolve, resolved_list):
+                    if isinstance(res_data, dict) and res_data.get("manifest_url"):
+                        stream_map[(se, ep)] = res_data
+
+            # تحديث العناصر بروابط البث المباشرة والـ Cookie
+            for item in download_links:
+                se_ep = (item.get("season", 0) or 0, item.get("episode", 0) or 0)
+                if se_ep in stream_map and (is_dummy_video(item.get("url")) or not item.get("url")):
+                    s_info = stream_map[se_ep]
+                    item["url"] = s_info["manifest_url"]
+                    item["stream_type"] = "dash"
+                    item["cookie"] = s_info["cookie"]
+                    item["headers"] = s_info["headers"]
+                    item["resolutions_available"] = s_info["resolutions"]
+                    if s_info.get("size") and not item.get("size"):
+                        item["size"] = s_info["size"]
+                    if s_info.get("duration") and not item.get("duration"):
+                        item["duration"] = s_info["duration"]
+                    if s_info.get("codec") and not item.get("codec"):
+                        item["codec"] = s_info["codec"]
+
+            # في حال لم تكن هناك أي روابط في الأساس، ننشئ مدخلاً من stream_map
+            if not download_links and stream_map:
+                for (se, ep), s_info in stream_map.items():
+                    download_links.append({
+                        "url": s_info["manifest_url"],
+                        "resolution": s_info["resolutions"][0] if s_info["resolutions"] else 1080,
+                        "size": s_info.get("size"),
+                        "season": se,
+                        "episode": ep,
+                        "resource_id": f"stream_{subject_id}_{se}_{ep}",
+                        "codec": s_info.get("codec"),
+                        "duration": s_info.get("duration", 0),
+                        "source_url": None,
+                        "stream_type": "dash",
+                        "cookie": s_info["cookie"],
+                        "headers": s_info["headers"],
+                        "resolutions_available": s_info["resolutions"],
+                        "subtitles_available": False,
+                        "has_arabic_subtitle": False,
+                        "arabic_subtitle_url": None,
+                        "all_subtitles": [],
+                        "total_languages": 0,
+                    })
+
+        # فلترة وحذف أي عنصر ما زال يحتوي على رابط الفيديو التنبيهي الوهمي
+        download_links = [x for x in download_links if not is_dummy_video(x.get("url"))]
 
         if not download_links:
             raise HTTPException(
-                status_code=404, detail="لم يتم العثور على روابط تحميل"
+                status_code=404, detail="لم يتم العثور على روابط تحميل أو بث صالحة"
             )
 
         download_links.sort(key=lambda x: (
@@ -550,6 +692,58 @@ async def get_download_links(
         raise HTTPException(
             status_code=500,
             detail="حدث خطأ في جلب الروابط. حاول مرة أخرى.",
+        )
+
+
+@app.get("/get_stream")
+@limiter.limit("30/minute")
+async def get_stream(
+    request: Request,
+    subject_id: str = Query(..., description="معرف المحتوى في MovieBox"),
+    season: int = Query(0, ge=0, description="رقم الموسم (0 للأفلام)"),
+    episode: int = Query(0, ge=0, description="رقم الحلقة (0 للأفلام)"),
+):
+    """
+    جلب رابط البث المباشر الموقّع (MPEG-DASH index.mpd) مع الـ Cookie و Headers المطلوبة لتشغيله في ExoPlayer.
+    """
+    subject_id = subject_id.strip()
+    if not subject_id:
+        raise HTTPException(status_code=400, detail="subject_id مطلوب")
+
+    try:
+        async with get_client() as client:
+            stream_info = await resolve_stream_for_episode(
+                client, subject_id, season, episode
+            )
+
+        if not stream_info:
+            raise HTTPException(
+                status_code=404, detail="لم يتم العثور على رابط بث لهذا المحتوى"
+            )
+
+        return JSONResponse(
+            content={
+                "status": "success",
+                "subject_id": subject_id,
+                "season": season,
+                "episode": episode,
+                "stream_url": stream_info["manifest_url"],
+                "stream_type": "dash",
+                "cookie": stream_info["cookie"],
+                "headers": stream_info["headers"],
+                "resolutions": stream_info["resolutions"],
+                "codec": stream_info["codec"],
+                "duration": stream_info["duration"],
+                "size": stream_info["size"],
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Get stream error: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=500, detail="حدث خطأ في جلب رابط البث. حاول مرة أخرى."
         )
 
 
@@ -1126,6 +1320,7 @@ async def root():
             "search":                  "/search?query=TITLE&original_language=en&limit=8",
             "get_download_links":      "/get_download_links?subject_id=ID",
             "get_download_links_1res": "/get_download_links?subject_id=ID&resolution=1080",
+            "get_stream":              "/get_stream?subject_id=ID&season=0&episode=0",
             "get_subtitles":           "/get_subtitles?subject_id=ID&resource_id=RID",
             "trending":                "/trending?tab=movie&page=1&safe_mode=true&limit=20",
             "browse":                  "/browse?genre=action,drama&type=all&sort=rating&safe_mode=true&limit=20",
@@ -1138,6 +1333,7 @@ async def root():
         "rate_limits": {
             "search": "30/minute",
             "get_download_links": "20/minute",
+            "get_stream": "30/minute",
             "get_subtitles": "60/minute",
             "trending": "15/minute",
             "browse": "15/minute",
