@@ -587,19 +587,21 @@ async def get_download_links(
             # ── حل وتحديث روابط البث الحقيقية (DASH) وإزالة الفيديو الوهمي ──
             episodes_to_resolve = set()
             for item in download_links:
-                if is_dummy_video(item.get("url")) or not item.get("url"):
+                u = item.get("url") or ""
+                needs_resolve = is_dummy_video(u) or not u or (".mpd" in u and not item.get("cookie"))
+                if needs_resolve:
                     episodes_to_resolve.add((item.get("season", 0) or 0, item.get("episode", 0) or 0))
 
             if not download_links:
                 episodes_to_resolve.add((0, 0))
 
+            stream_map = {}
             if episodes_to_resolve:
                 ep_tasks = [
                     resolve_stream_for_episode(client, subject_id, se, ep)
                     for se, ep in episodes_to_resolve
                 ]
                 resolved_list = await asyncio.gather(*ep_tasks, return_exceptions=True)
-                stream_map = {}
                 for (se, ep), res_data in zip(episodes_to_resolve, resolved_list):
                     if isinstance(res_data, dict) and res_data.get("manifest_url"):
                         stream_map[(se, ep)] = res_data
@@ -607,7 +609,9 @@ async def get_download_links(
             # تحديث العناصر بروابط البث المباشرة والـ Cookie
             for item in download_links:
                 se_ep = (item.get("season", 0) or 0, item.get("episode", 0) or 0)
-                if se_ep in stream_map and (is_dummy_video(item.get("url")) or not item.get("url")):
+                u = item.get("url") or ""
+                needs_resolve = is_dummy_video(u) or not u or (".mpd" in u and not item.get("cookie"))
+                if se_ep in stream_map and needs_resolve:
                     s_info = stream_map[se_ep]
                     item["url"] = s_info["manifest_url"]
                     item["stream_type"] = "dash"
