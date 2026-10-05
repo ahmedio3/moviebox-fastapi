@@ -18,7 +18,7 @@ async def root():
         "version": "8.0",
         "endpoints": {
             "search":                  "/search?query=TITLE&original_language=en&limit=8",
-            "get_download_links":      "/get_download_links?subject_id=ID",
+            "get_download_links":      "/get_download_links?subject_id=ID&season=1&episode=1&page=1&limit=10",
             "get_download_links_1res": "/get_download_links?subject_id=ID&resolution=1080",
             "get_stream":              "/get_stream?subject_id=ID&season=0&episode=0",
             "get_subtitles":           "/get_subtitles?subject_id=ID&resource_id=RID",
