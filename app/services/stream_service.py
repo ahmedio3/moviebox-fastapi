@@ -94,7 +94,11 @@ def estimate_sizes_by_resolution(base_size: int, resolutions: list[int]) -> dict
 
 
 async def resolve_stream_for_episode(
-    client: MovieBoxHttpClient, subject_id: str, season: int = 0, episode: int = 0
+    client: MovieBoxHttpClient,
+    subject_id: str,
+    season: int = 0,
+    episode: int = 0,
+    fetch_mpd: bool = True,
 ) -> dict | None:
     """
     Queries /wefeed-mobile-bff/subject-api/play-info and extracts the real DASH stream,
@@ -118,20 +122,21 @@ async def resolve_stream_for_episode(
                 ]
 
                 sizes: dict[int, int] = {}
-                try:
-                    mpd_resp = await client.get_raw(
-                        manifest_url,
-                        headers={"Cookie": cookie_val, "User-Agent": "Mozilla/5.0"}
-                    )
-                    if mpd_resp.status_code == 200:
-                        sizes = parse_mpd_content(
-                            mpd_resp.text,
-                            fallback_duration=int(st.get("duration", 0) or 0)
-                        )
-                except Exception as ex:
-                    logger.warning(f"⚠️ Failed to fetch/parse MPD for sizes: {ex}")
-
                 base_size = int(st.get("size", 0) or 0)
+                if fetch_mpd:
+                    try:
+                        mpd_resp = await client.get_raw(
+                            manifest_url,
+                            headers={"Cookie": cookie_val, "User-Agent": "Mozilla/5.0"}
+                        )
+                        if mpd_resp.status_code == 200:
+                            sizes = parse_mpd_content(
+                                mpd_resp.text,
+                                fallback_duration=int(st.get("duration", 0) or 0)
+                            )
+                    except Exception as ex:
+                        logger.warning(f"⚠️ Failed to fetch/parse MPD for sizes: {ex}")
+
                 if not sizes and base_size > 0:
                     sizes = estimate_sizes_by_resolution(base_size, resolutions)
 
