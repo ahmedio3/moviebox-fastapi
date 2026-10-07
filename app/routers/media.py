@@ -105,10 +105,11 @@ async def get_download_links(
                     qualities_to_emit = [resolution] if (resolution is not None and resolution in avail_resolutions) else (avail_resolutions if resolution is None else [avail_resolutions[0]])
 
                     for q in qualities_to_emit:
+                        q_size = s_info.get("sizes", {}).get(q) or s_info.get("size")
                         download_links.append({
                             "url": s_info["manifest_url"],
                             "resolution": q,
-                            "size": s_info.get("size"),
+                            "size": q_size,
                             "season": target_season,
                             "episode": target_episode,
                             "resource_id": matched_item.get("resourceId") if matched_item else f"stream_{subject_id}_{target_season}_{target_episode}",
@@ -238,10 +239,11 @@ async def get_download_links(
                             qualities_to_emit = avail_resolutions
 
                         for q in qualities_to_emit:
+                            q_size = s_info.get("sizes", {}).get(q) or s_info.get("size")
                             download_links.append({
                                 "url": s_info["manifest_url"],
                                 "resolution": q,
-                                "size": s_info.get("size"),
+                                "size": q_size,
                                 "season": se,
                                 "episode": ep,
                                 "resource_id": first_item.get("resourceId") if first_item else f"stream_{subject_id}_{se}_{ep}",
