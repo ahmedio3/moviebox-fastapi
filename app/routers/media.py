@@ -120,18 +120,44 @@ async def get_download_links(
             # 3. جلب البيانات الوصفية (resourceId والترجمات) للشريحة عبر RESOURCE_PATH
             meta_by_ep: dict[tuple[int, int], dict] = {}
             if target_episodes:
-                try:
-                    res_meta = await client.get_from_api(
-                        RESOURCE_PATH,
-                        params={"subjectId": subject_id, "se": target_season, "page": page}
-                    )
-                    res_items = res_meta.get("list", []) if isinstance(res_meta, dict) else []
+                pages_needed: set[int] = set()
+                if seasons_map and not is_movie:
+                    for se_num, ep_num in target_episodes:
+                        # في MovieBox، الحلقات مرقمة تسلسلياً عبر كل المواسم بمعدل 10 عناصر لكل صفحة
+                        prior_eps = sum(seasons_map[s] for s in sorted(seasons_map.keys()) if s < se_num)
+                        global_idx = prior_eps + ep_num
+                        p = ((global_idx - 1) // 10) + 1
+                        pages_needed.add(p)
+                    # نافذة أمان لتفادي أي تفاوت طفيف في عدد حلقات المواسم السابقة على سيرفر MovieBox
+                    min_p = min(pages_needed)
+                    max_p = max(pages_needed)
+                    if min_p > 1:
+                        pages_needed.add(min_p - 1)
+                    pages_needed.add(max_p + 1)
+                else:
+                    pages_needed.add(page)
+
+                async def fetch_meta_page(p: int):
+                    try:
+                        res_meta = await client.get_from_api(
+                            RESOURCE_PATH,
+                            params={"subjectId": subject_id, "page": p}
+                        )
+                        return res_meta.get("list", []) if isinstance(res_meta, dict) else []
+                    except Exception as ex:
+                        logger.warning(f"⚠️ Failed to fetch RESOURCE_PATH for {subject_id} page {p}: {ex}")
+                        return []
+
+                meta_results = await asyncio.gather(*[fetch_meta_page(p) for p in sorted(pages_needed)])
+                for res_items in meta_results:
                     for it in res_items:
-                        it_key = (it.get("se", target_season), it.get("ep", 0))
+                        it_se = it.get("se")
+                        if it_se is None:
+                            it_se = target_season
+                        it_ep = it.get("ep", 0)
+                        it_key = (it_se, it_ep)
                         if it_key not in meta_by_ep:
                             meta_by_ep[it_key] = it
-                except Exception as ex:
-                    logger.warning(f"⚠️ Failed to fetch RESOURCE_PATH for {subject_id} S{target_season} P{page}: {ex}")
 
             # 4. حل روابط البث المباشر (DASH) بالتوازي لجميع حلقات الشريحة
             stream_tasks = [
@@ -165,6 +191,21 @@ async def get_download_links(
                 }
                 if matching_item and matching_item.get("extCaptions"):
                     sub_info = build_subtitle_summary(matching_item["extCaptions"])
+
+                # إذا كانت حلقة واحدة والترجمات غير مرفقة بالملف مباشرة، جلبها عبر resourceId
+                if (
+                    len(target_episodes) == 1
+                    and not sub_info["subtitles_available"]
+                    and matching_item
+                    and matching_item.get("resourceId")
+                ):
+                    try:
+                        cf_fetcher = DownloadableCaptionFileDetails(client_session=client)
+                        cap_data = await cf_fetcher.get_content(subject_id, str(matching_item["resourceId"]))
+                        if cap_data and cap_data.get("extCaptions"):
+                            sub_info = build_subtitle_summary(cap_data["extCaptions"])
+                    except Exception as ex:
+                        logger.warning(f"⚠️ Failed to fetch captions for single episode {matching_item.get('resourceId')}: {ex}")
 
                 if ep_key in stream_map:
                     s_info = stream_map[ep_key]
