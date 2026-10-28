@@ -8,7 +8,6 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from moviebox_api.v3.http_client import MovieBoxHttpClient
 from slowapi.errors import RateLimitExceeded
 
 from app.config import (
@@ -17,11 +16,11 @@ from app.config import (
     TMDB_LANG_MAP,
     DUBBED_KEYWORDS,
     ARABIC_LAN_CODES,
-    DUMMY_VIDEO_HASH,
+    DUMMY_VIDEO_HASHES,
     ADULT_KEYWORDS,
     ADULT_QUERIES,
 )
-from app.core.client import _refresh_token, get_client
+from app.core.client import get_client
 from app.core.limiter import limiter, rate_limit_handler
 from app.routers import (
     adult_router,
@@ -56,8 +55,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("🚀 Watchera MovieBox API started")
     try:
-        async with MovieBoxHttpClient() as client:
-            await _refresh_token(client)
+        async with get_client():
+            pass
     except Exception as e:
         logger.warning(f"⚠️ Startup token initialization skipped: {e}")
     yield

@@ -215,10 +215,12 @@ async def get_download_links(
                     else:
                         qualities_to_emit = avail_resolutions
 
+                    urls_by_resolution = s_info.get("urls_by_resolution") or {}
                     for q in qualities_to_emit:
                         q_size = s_info.get("sizes", {}).get(q) or s_info.get("size")
+                        q_url = urls_by_resolution.get(q) or s_info["manifest_url"]
                         download_links.append({
-                            "url": s_info["manifest_url"],
+                            "url": q_url,
                             "resolution": q,
                             "size": q_size,
                             "season": se,
@@ -227,7 +229,7 @@ async def get_download_links(
                             "codec": s_info.get("codec"),
                             "duration": s_info.get("duration", 0),
                             "source_url": None,
-                            "stream_type": "dash",
+                            "stream_type": s_info.get("stream_type", "dash"),
                             "cookie": s_info["cookie"],
                             "headers": s_info["headers"],
                             "resolutions_available": s_info["resolutions"],
@@ -353,7 +355,7 @@ async def get_stream(
                 "season": season,
                 "episode": episode,
                 "stream_url": stream_info["manifest_url"],
-                "stream_type": "dash",
+                "stream_type": stream_info.get("stream_type", "dash"),
                 "cookie": stream_info["cookie"],
                 "headers": stream_info["headers"],
                 "resolutions": stream_info["resolutions"],

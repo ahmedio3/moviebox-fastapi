@@ -39,7 +39,17 @@ DUBBED_KEYWORDS = [
 
 ARABIC_LAN_CODES = {"ar", "ara", "arabic"}
 
-DUMMY_VIDEO_HASH = "b164fbfb4347792950bdfbfb563d39d9"
+# Anti-piracy "please update the app" clips served by the MovieBox backend.
+# Any URL containing one of these hashes (or a known dummy path) is not real media.
+DUMMY_VIDEO_HASHES = [
+    "b164fbfb4347792950bdfbfb563d39d9",  # 2026-09-04 warning clip
+    "80da52722ee7de7a4303290af6783424",  # 2026-10-10 warning clip
+]
+
+DUMMY_VIDEO_PATH_MARKERS = (
+    "/other/2026/09/04/",
+    "/other/2026/10/10/",
+)
 
 ADULT_KEYWORDS = [
     "+18", "xxx", "adult", "hentai", "erotica", "porn", "nsfw", "sex",

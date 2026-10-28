@@ -4,7 +4,8 @@ from app.config import (
     ADULT_KEYWORDS,
     ARABIC_LAN_CODES,
     DUBBED_KEYWORDS,
-    DUMMY_VIDEO_HASH,
+    DUMMY_VIDEO_HASHES,
+    DUMMY_VIDEO_PATH_MARKERS,
 )
 
 
@@ -71,6 +72,10 @@ def is_adult(item: dict) -> bool:
 
 
 def is_dummy_video(url: str | None) -> bool:
+    """Returns True for MovieBox's anti-piracy warning clips."""
     if not url:
         return False
-    return DUMMY_VIDEO_HASH in str(url)
+    value = str(url)
+    return any(h in value for h in DUMMY_VIDEO_HASHES) or any(
+        marker in value for marker in DUMMY_VIDEO_PATH_MARKERS
+    )
