@@ -331,7 +331,10 @@ async def get_stream(
     episode: int = Query(0, ge=0, description="رقم الحلقة (0 للأفلام)"),
 ):
     """
-    جلب رابط البث المباشر الموقّع (MPEG-DASH index.mpd) مع الـ Cookie و Headers المطلوبة لتشغيله في ExoPlayer.
+    جلب رابط البث المباشر الموقّع (MPEG-DASH index_web.mpd) مع الـ Headers المطلوبة لتشغيله في ExoPlayer.
+
+    المصادقة تتم عبر هيدر ``X-MB-Token`` (قيمة ``signCookie``) و``Referer``، وليس عبر ``Cookie``.
+    الحقل ``cookie`` في الاستجابة فارغ دائماً.
     """
     subject_id = subject_id.strip()
     if not subject_id:

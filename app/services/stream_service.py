@@ -64,8 +64,8 @@ async def _fetch_web_play(
     season: int,
     episode: int,
     detail_path: str,
-) -> dict | None:
-    """Calls the web player endpoint and returns its ``data`` payload."""
+) -> tuple[dict | None, str]:
+    """Calls the web player endpoint and returns ``(data, referer)``."""
     params = {
         "subjectId": subject_id,
         "se": season,
@@ -98,21 +98,18 @@ async def _fetch_web_play(
                 continue
             data = response.json().get("data") or {}
             if data.get("streams") or data.get("dash") or data.get("hls"):
-                return data
+                return data, referer
         except Exception as e:
             logger.debug(f"Web play {base} failed: {type(e).__name__}: {e}")
-    return None
+    return None, referer
 
 
 async def _mpd_sizes(
     client: MovieBoxHttpClient,
     manifest_url: str,
-    cookie: str | None,
+    headers: dict[str, str],
     fallback_duration: int,
 ) -> dict[int, int]:
-    headers = {"User-Agent": WEB_USER_AGENT}
-    if cookie:
-        headers["Cookie"] = cookie
     try:
         mpd_resp = await client.get_raw(manifest_url, headers=headers)
         if mpd_resp.status_code == 200:
@@ -125,18 +122,12 @@ async def _mpd_sizes(
 
 
 def _build_web_stream_info(
-    data: dict, sizes: dict[int, int]
+    data: dict, sizes: dict[int, int], referer: str
 ) -> dict | None:
     """Converts a web ``subject/play`` payload into the internal stream shape."""
     for st in data.get("dash") or []:
-        sign_cookie = str(st.get("signCookie") or "")
-        manifest_url, cookie_val = extract_dash_from_cookie(sign_cookie)
+        manifest_url = _dash_manifest_url(st)
         if not manifest_url:
-            candidate = str(st.get("url") or "")
-            if candidate and ".mpd" in candidate:
-                manifest_url = candidate
-                cookie_val = sign_cookie.strip() or None
-        if not manifest_url or is_dummy_video(manifest_url):
             continue
 
         resolutions = [
@@ -152,11 +143,8 @@ def _build_web_stream_info(
         return {
             "manifest_url": manifest_url,
             "urls_by_resolution": {r: manifest_url for r in resolutions},
-            "cookie": cookie_val or "",
-            "headers": {
-                "Cookie": cookie_val or "",
-                "User-Agent": WEB_USER_AGENT,
-            },
+            "cookie": "",
+            "headers": _dash_headers(st, referer),
             "resolutions": resolutions,
             "sizes": sizes,
             "codec": st.get("codecName"),
@@ -191,7 +179,10 @@ def _build_web_stream_info(
             r: st.get("url") for r, st in variants.items()
         },
         "cookie": "",
-        "headers": {"User-Agent": WEB_USER_AGENT},
+        "headers": {
+            "User-Agent": WEB_USER_AGENT,
+            "Referer": referer,
+        },
         "resolutions": resolutions,
         "sizes": {
             r: int(st.get("size", 0) or 0) for r, st in variants.items()
@@ -203,9 +194,14 @@ def _build_web_stream_info(
     }
 
 
-def extract_dash_from_cookie(sign_cookie: str) -> tuple[str | None, str | None]:
+def extract_dash_from_cookie(
+    sign_cookie: str, manifest_name: str = "index.mpd"
+) -> tuple[str | None, str | None]:
     """
-    Extracts the DASH manifest URL (index.mpd) and the Edge-Cache-Cookie header value.
+    Extracts the DASH manifest URL and the signed Edge-Cache-Cookie value.
+
+    The native player uses ``index.mpd`` while the web player serves
+    ``index_web.mpd``; pass the appropriate ``manifest_name``.
     """
     if not sign_cookie or "urlprefix=" not in sign_cookie:
         return None, None
@@ -215,11 +211,38 @@ def extract_dash_from_cookie(sign_cookie: str) -> tuple[str | None, str | None]:
         prefix = base64.b64decode(prefix_b64 + "=" * padding).decode("utf-8")
         if not prefix.endswith("/"):
             prefix += "/"
-        manifest_url = f"{prefix}index.mpd"
+        manifest_url = f"{prefix}{manifest_name}"
         return manifest_url, sign_cookie.strip()
     except Exception as e:
         logger.error(f"Error parsing sign_cookie: {e}")
         return None, None
+
+
+def _dash_manifest_url(stream: dict) -> str | None:
+    """Returns the playable DASH manifest URL for a web player stream entry."""
+    candidate = str(stream.get("url") or "")
+    if candidate and ".mpd" in candidate and not is_dummy_video(candidate):
+        return candidate
+
+    manifest_url, _ = extract_dash_from_cookie(
+        str(stream.get("signCookie") or ""), manifest_name="index_web.mpd"
+    )
+    if manifest_url and not is_dummy_video(manifest_url):
+        return manifest_url
+    return None
+
+
+def _dash_headers(stream: dict, referer: str) -> dict[str, str]:
+    """Builds the headers required by the signed DASH CDN."""
+    headers = {
+        "User-Agent": WEB_USER_AGENT,
+        "Referer": referer,
+    }
+    sign_cookie = str(stream.get("signCookie") or "").strip()
+    if sign_cookie:
+        token_key = str(stream.get("signHeaderKey") or "").strip()
+        headers[token_key or "X-MB-Token"] = sign_cookie
+    return headers
 
 
 def parse_mpd_content(mpd_text: str, fallback_duration: int = 0) -> dict[int, int]:
@@ -365,26 +388,25 @@ async def resolve_stream_for_episode(
 
     detail_path = await _get_detail_path(client, subject_id)
     if detail_path:
-        web_data = await _fetch_web_play(
+        web_data, referer = await _fetch_web_play(
             client, subject_id, season, episode, detail_path
         )
         if web_data:
             sizes: dict[int, int] = {}
             if fetch_mpd:
                 for st in web_data.get("dash") or []:
-                    sign_cookie = str(st.get("signCookie") or "")
-                    candidate, cookie_val = extract_dash_from_cookie(sign_cookie)
-                    if not candidate or is_dummy_video(candidate):
+                    candidate = _dash_manifest_url(st)
+                    if not candidate:
                         continue
                     sizes = await _mpd_sizes(
                         client,
                         candidate,
-                        cookie_val,
+                        _dash_headers(st, referer),
                         int(st.get("duration", 0) or 0),
                     )
                     break
 
-            info = _build_web_stream_info(web_data, sizes)
+            info = _build_web_stream_info(web_data, sizes, referer)
             if info:
                 logger.info(
                     f"🌐 Resolved {subject_id} S{season}E{episode} via web play fallback"
