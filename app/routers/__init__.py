@@ -6,7 +6,6 @@ from app.routers.discover import router as discover_router
 from app.routers.adult import router as adult_router
 from app.routers.features import router as features_router
 from app.routers.system import router as system_router
-from app.routers.debug import router as debug_router
 
 __all__ = [
     "search_router",
@@ -15,5 +14,4 @@ __all__ = [
     "adult_router",
     "features_router",
     "system_router",
-    "debug_router",
 ]
