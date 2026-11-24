@@ -15,7 +15,7 @@ async def health_check():
 async def root():
     return JSONResponse(content={
         "name": "MovieBox FastAPI Backend for Watchera",
-        "version": "8.2",
+        "version": "8.2.1",
         "endpoints": {
             "search":                  "/search?query=TITLE&original_language=en&limit=8",
             "search_v2":               "/search_v2?query=TITLE&tab=all&page=1&limit=15",
