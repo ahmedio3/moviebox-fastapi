@@ -329,6 +329,7 @@ curl "https://moviebox-fastapi.vercel.app/home?limit_per_section=5"
 - `groups` تظهر فقط في أقسام التصنيفات مثل `RANKING_LIST_MULTI_TAB`، وكل مجموعة تحتوي `title` و`results`.
 - الأقسام الإعلانية (`SINGLE_IMAGE`)، والبث الرياضي (`SPORT_LIVE`)، والمنشورات (`CUSTOM`)، والفلاتر (`FILTER`) تُستبعد لأنها ليست عناوين قابلة للتشغيل.
 - `total_results` هو عدد العناصر الفريدة في القسم قبل قصّ `items` إلى `limit_per_section`.
+- إذا رجع تبويب `all` فارغاً في منطقة معينة (يحدث على بعض سيرفرات أوروبا)، يجمع الـAPI الأقسام تلقائياً من تبويبات Movie وTV وAnime بدلاً من إرجاع صفحة فارغة.
 
 ---
 

@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from moviebox_api.v3.constants import TabID
-from moviebox_api.v3.core import Homepage, SearchV2
+from moviebox_api.v3.core import SearchV2
 
 from app.core.client import get_client
 from app.core.limiter import limiter
@@ -14,6 +14,7 @@ from app.services.extra_service import (
     fetch_recommendations,
     fetch_suggestions,
 )
+from app.services.home_service import fetch_home_sections
 from app.utils.formatters import format_search_item
 from app.utils.helpers import is_adult
 
@@ -241,13 +242,10 @@ async def home_sections(
     """أقسام الصفحة الرئيسية بعناوينها وترتيبها الأصلي."""
     try:
         async with get_client() as client:
-            homepage = Homepage(client_session=client)
-            homepage._page_number = page
-            homepage._tab_id = 0
-            data = await homepage.get_content()
+            raw_sections = await fetch_home_sections(client, page=page)
 
         sections: list[dict] = []
-        for section in data.get("items") or []:
+        for section in raw_sections:
             groups: list[dict] = []
             direct_items: list[dict] = []
 

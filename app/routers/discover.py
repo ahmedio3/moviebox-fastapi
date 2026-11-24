@@ -6,10 +6,11 @@ import random
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from moviebox_api.v3.constants import SubjectType
-from moviebox_api.v3.core import Homepage, Search
+from moviebox_api.v3.core import Search
 
 from app.core.client import get_client
 from app.core.limiter import limiter
+from app.services.home_service import fetch_home_sections
 from app.utils.formatters import format_search_item
 from app.utils.helpers import is_adult
 
@@ -41,12 +42,9 @@ async def trending_content(
 
     try:
         async with get_client() as client:
-            homepage = Homepage(client_session=client)
-            homepage._page_number = page
-            homepage._tab_id = tab_id
-            data = await homepage.get_content()
-
-        raw_items = data.get("items", [])
+            raw_items = await fetch_home_sections(
+                client, page=page, tab_id=tab_id
+            )
         if not raw_items:
             return JSONResponse(content={
                 "status": "success", "total_results": 0, "results": []

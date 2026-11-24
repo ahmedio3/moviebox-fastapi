@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MovieBox FastAPI Backend for Watchera",
-    version="8.3",
+    version="8.4",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
