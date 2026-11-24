@@ -25,6 +25,7 @@ from app.core.limiter import limiter, rate_limit_handler
 from app.routers import (
     adult_router,
     discover_router,
+    features_router,
     media_router,
     search_router,
     system_router,
@@ -67,7 +68,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MovieBox FastAPI Backend for Watchera",
-    version="8.1",
+    version="8.2",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -84,6 +85,7 @@ app.include_router(search_router)
 app.include_router(media_router)
 app.include_router(discover_router)
 app.include_router(adult_router)
+app.include_router(features_router)
 app.include_router(system_router)
 
 

@@ -4,6 +4,7 @@ from app.routers.search import router as search_router
 from app.routers.media import router as media_router
 from app.routers.discover import router as discover_router
 from app.routers.adult import router as adult_router
+from app.routers.features import router as features_router
 from app.routers.system import router as system_router
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "media_router",
     "discover_router",
     "adult_router",
+    "features_router",
     "system_router",
 ]

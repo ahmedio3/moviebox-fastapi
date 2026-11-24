@@ -3,7 +3,7 @@
 # MovieBox FastAPI Backend
 
 واجهة REST خفيفة تعمل كوسيط بين تطبيق **Watchera** لأندرويد وخدمات MovieBox.
-توفّر البحث، تفاصيل المحتوى، الاكتشاف، روابط البث والتحميل، والترجمات.
+توفّر البحث والاقتراحات التلقائية، تفاصيل المحتوى والعروض المشابهة، أقسام الرئيسية، الاكتشاف، روابط البث والتحميل، والترجمات.
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.0-009688.svg)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://python.org)
@@ -69,7 +69,12 @@ python main.py
 | `GET` | `/` | — | معلومات API وقائمة المسارات |
 | `GET` | `/health` | — | فحص الحالة |
 | `GET` | `/search` | 30/دقيقة | البحث في كتالوج MovieBox |
+| `GET` | `/search_v2` | 30/دقيقة | بحث متقدم بتبويبات ومجموعات نتائج |
+| `GET` | `/suggest` | 60/دقيقة | إكمال تلقائي أثناء الكتابة |
 | `GET` | `/item_details` | 30/دقيقة | تفاصيل فيلم أو مسلسل |
+| `GET` | `/recommend` | 30/دقيقة | عروض مشابهة لمحتوى معيّن |
+| `GET` | `/home` | 15/دقيقة | أقسام الصفحة الرئيسية بعناوينها |
+| `GET` | `/popular_searches` | 30/دقيقة | الأكثر بحثاً وقوائم Movie/TV الرائجة |
 | `GET` | `/trending` | 15/دقيقة | المحتوى الرائج |
 | `GET` | `/browse` | 15/دقيقة | تصفّح مع فلاتر |
 | `GET` | `/random` | 15/دقيقة | محتوى عشوائي |
@@ -134,6 +139,98 @@ curl "https://moviebox-fastapi.vercel.app/search?query=Obsession&limit=1"
 
 ---
 
+### `GET /search_v2`
+
+بحث متقدم يعيد النتائج الأساسية مع تبويبات ومجموعات إضافية.
+
+| المعامل | النوع | مطلوب | الوصف |
+|---|---|---|---|
+| `query` | `string` | ✅ | اسم الفيلم أو المسلسل |
+| `tab` | `string` | ❌ | `all`, `movie`, `tv`, `short_tv`, `movie_tv`, `fightzone`, `sports`, `music`, `people`, `education` (افتراضي `all`) |
+| `page` | `int` | ❌ | رقم الصفحة (افتراضي 1) |
+| `limit` | `int` | ❌ | أقصى عدد لكل مجموعة، من 1 إلى 20 (افتراضي 15) |
+| `safe_mode` | `bool` | ❌ | استبعاد المحتوى غير اللائق (افتراضي `true`) |
+
+```bash
+curl "https://moviebox-fastapi.vercel.app/search_v2?query=avatar&tab=all&limit=5"
+```
+
+بنية الاستجابة:
+
+```json
+{
+  "status": "success",
+  "query": "avatar",
+  "tab": "All",
+  "page": 1,
+  "limit": 5,
+  "total_results": 15,
+  "tabs": [
+    {"id": "All", "name": "All"},
+    {"id": "MovieTV", "name": "Movie/Series"},
+    {"id": "Movie", "name": "Movie", "parent_id": "MovieTV"},
+    {"id": "TV", "name": "TV/Series", "parent_id": "MovieTV"}
+  ],
+  "main": {
+    "topic_type": "SUBJECT",
+    "total_results": 5,
+    "results": []
+  },
+  "groups": [
+    {
+      "title": "Related FightZone Videos",
+      "topic_type": "SUBJECT",
+      "show_more": true,
+      "more_tab_id": "FightZone",
+      "total_results": 3,
+      "results": []
+    }
+  ],
+  "results": []
+}
+```
+
+- `main` هي النتائج الأساسية للاستعلام.
+- `groups` مجموعات إضافية مثل `Related FightZone Videos` و`Related Sports` و`Related Music` و`Related Education`.
+- `results` قائمة مسطحة بدون تكرار تجمع `main` و`groups`، ومناسبة إذا أراد التطبيق عرض قائمة واحدة.
+- `limit` يُطبّق على كل مجموعة على حدة، والحد الأقصى 20 لأن MovieBox نفسه يحد `perPage` بهذه القيمة.
+- التبويبات المتاحة قد تختلف حسب الاستعلام؛ لا تفترض وجودها كلها.
+
+---
+
+### `GET /suggest`
+
+إكمال تلقائي للعناوين أثناء الكتابة. مناسب لشريط البحث بعد كتابة حرفين أو ثلاثة.
+
+| المعامل | النوع | مطلوب | الوصف |
+|---|---|---|---|
+| `query` | `string` | ✅ | النص المكتوب |
+| `limit` | `int` | ❌ | عدد الاقتراحات، من 1 إلى 20 (افتراضي 10) |
+
+```bash
+curl "https://moviebox-fastapi.vercel.app/suggest?query=avatar&limit=5"
+```
+
+```json
+{
+  "status": "success",
+  "query": "avatar",
+  "total_results": 5,
+  "suggestions": [
+    {"text": "Avatar: Seven Havens", "type": 0},
+    {"text": "Avatar Aang: The Last Airbender", "type": 0},
+    {"text": "Avatar: The Last Airbender [French dub]", "type": 0},
+    {"text": "Avatar: The Last Airbender", "type": 0},
+    {"text": "avatar the last airbender season 2", "type": 0}
+  ]
+}
+```
+
+- الاقتراحات نصوص جاهزة للبحث، وليست عناصر كتالوج.
+- استخدم `text` مباشرة كـ `query` في `/search` عند اختيار المستخدم.
+
+---
+
 ### `GET /item_details`
 
 | المعامل | النوع | مطلوب | الوصف |
@@ -148,6 +245,133 @@ curl "https://moviebox-fastapi.vercel.app/item_details?subject_id=17323780508236
 الحقول الأساسية داخل `item`: `subject_id`, `title`, `description`, `poster`, `rating`, `year`, `type`, `languages`, `country`, `genre`, `seasons_count`, `duration_seconds`, `has_resource`.
 
 مع `include_seasons=true` يُضاف كائن `seasons` كما يعيده MovieBox (قائمة المواسم وعدد الحلقات والجودات المتاحة).
+
+---
+
+### `GET /recommend`
+
+عروض مشابهة للمحتوى الحالي. استخدمه في شاشة التفاصيل أسفل معلومات الفيلم أو المسلسل.
+
+| المعامل | النوع | مطلوب | الوصف |
+|---|---|---|---|
+| `subject_id` | `string` | ✅ | معرّف المحتوى المرجعي |
+| `page` | `int` | ❌ | رقم الصفحة (افتراضي 1) |
+| `limit` | `int` | ❌ | عدد النتائج، من 1 إلى 50 (افتراضي 10) |
+| `safe_mode` | `bool` | ❌ | استبعاد المحتوى غير اللائق (افتراضي `true`) |
+
+```bash
+curl "https://moviebox-fastapi.vercel.app/recommend?subject_id=1732378050823619144&limit=5"
+```
+
+```json
+{
+  "status": "success",
+  "subject_id": "1732378050823619144",
+  "page": 1,
+  "limit": 5,
+  "total_results": 5,
+  "has_more": true,
+  "results": [
+    {"subject_id": "...", "title": "Obsession[ترجمة عربية]", "type": "movie"},
+    {"subject_id": "...", "title": "Mermaid Down", "type": "movie"}
+  ]
+}
+```
+
+- النتائج بنفس صيغة عنصر البحث.
+- `has_more` يكون `true` عندما تعيد الصفحة عدداً مساوياً لـ `limit`.
+- MovieBox يعيد حتى حوالي 29 نتيجة لكل عنوان، لذا لا تطلب صفحات بعيدة بلا داعٍ.
+- قد يكرر المصدر بعض العناصر بين الصفحات أو يعيد الصفحة الأولى؛ هذا سلوك MovieBox وليس خطأً في الـAPI.
+
+---
+
+### `GET /home`
+
+أقسام الصفحة الرئيسية بعناوينها وترتيبها الأصلي. استخدمه لبناء شاشة رئيسية بصفوف أفقية بدلاً من دمج كل المحتوى في قائمة واحدة.
+
+| المعامل | النوع | مطلوب | الوصف |
+|---|---|---|---|
+| `page` | `int` | ❌ | رقم الصفحة (افتراضي 1) |
+| `safe_mode` | `bool` | ❌ | استبعاد المحتوى غير اللائق (افتراضي `true`) |
+| `limit_per_section` | `int` | ❌ | أقصى عدد عناصر لكل قسم، من 1 إلى 50 (افتراضي 20) |
+
+```bash
+curl "https://moviebox-fastapi.vercel.app/home?limit_per_section=5"
+```
+
+```json
+{
+  "status": "success",
+  "page": 1,
+  "total_sections": 16,
+  "sections": [
+    {
+      "title": "Trending Movies",
+      "type": "RANKING_LIST_MULTI_TAB",
+      "total_results": 33,
+      "items": [],
+      "groups": [
+        {"title": "Cinema", "total_results": 5, "results": []},
+        {"title": "TOP Movies", "total_results": 5, "results": []}
+      ]
+    },
+    {
+      "title": "Arabic Drama",
+      "type": "SUBJECTS_MOVIE",
+      "total_results": 5,
+      "items": []
+    }
+  ]
+}
+```
+
+- `items` قائمة مسطحة جاهزة لصف أفقي واحد.
+- `groups` تظهر فقط في أقسام التصنيفات مثل `RANKING_LIST_MULTI_TAB`، وكل مجموعة تحتوي `title` و`results`.
+- الأقسام الإعلانية (`SINGLE_IMAGE`)، والبث الرياضي (`SPORT_LIVE`)، والمنشورات (`CUSTOM`)، والفلاتر (`FILTER`) تُستبعد لأنها ليست عناوين قابلة للتشغيل.
+- `total_results` هو عدد العناصر الفريدة في القسم قبل قصّ `items` إلى `limit_per_section`.
+
+---
+
+### `GET /popular_searches`
+
+العناوين التي يبحث عنها الناس الآن، مع قوائم Movie وTV الرائجة.
+
+| المعامل | النوع | مطلوب | الوصف |
+|---|---|---|---|
+| `limit` | `int` | ❌ | أقصى عدد لكل فئة، من 1 إلى 20 (افتراضي 10) |
+| `safe_mode` | `bool` | ❌ | استبعاد المحتوى غير اللائق من قوائم `hot` (افتراضي `true`) |
+
+```bash
+curl "https://moviebox-fastapi.vercel.app/popular_searches?limit=3"
+```
+
+```json
+{
+  "status": "success",
+  "everyone_search": [
+    "The Mentalist [ترجمة عربية]",
+    "The Walking Dead [ترجمة عربية]",
+    "Khamsin Khamsin"
+  ],
+  "hot": [
+    {
+      "category": "Movie",
+      "name": "Movie",
+      "total_results": 3,
+      "results": []
+    },
+    {
+      "category": "TV",
+      "name": "TV",
+      "total_results": 3,
+      "results": []
+    }
+  ]
+}
+```
+
+- `everyone_search` نصوص جاهزة للبحث.
+- `hot` تستخدم نفس صيغة عنصر البحث.
 
 ---
 
@@ -479,11 +703,13 @@ moviebox-fastapi/
 │   ├── routers/
 │   │   ├── search.py           # /search و/item_details
 │   │   ├── discover.py         # /trending و/browse و/random
+│   │   ├── features.py         # /suggest و/recommend و/home و/popular_searches و/search_v2
 │   │   ├── media.py            # /get_download_links و/get_stream و/get_subtitles
 │   │   ├── adult.py            # /adult و/adult_keywords
 │   │   └── system.py           # / و/health
 │   ├── services/
 │   │   ├── download_service.py # تجميع صفحات التحميل
+│   │   ├── extra_service.py    # اقتراحات البحث والعروض المشابهة والأكثر بحثاً
 │   │   └── stream_service.py   # DASH، web play fallback، الهيدرز
 │   └── utils/
 │       ├── formatters.py       # توحيد صيغة الاستجابات

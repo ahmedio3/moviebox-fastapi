@@ -65,6 +65,13 @@ def score_result(item: dict, original_language: str | None, query: str) -> int:
     return score
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def format_search_item(item: dict) -> dict:
     """صيغة البحث - متوافقة مع MovieBoxSearchResult في Android."""
     release_date = item.get("releaseDate", "") or ""
@@ -86,7 +93,7 @@ def format_search_item(item: dict) -> dict:
         "type": "series" if is_series else "movie",
         "poster": get_cover_url(item.get("cover")),
         "year": year,
-        "rating": float(item.get("imdbRatingValue") or 0),
+        "rating": _safe_float(item.get("imdbRatingValue")),
         "seasons": season_count,
         "duration_seconds": duration_seconds,
         "languages": languages,
