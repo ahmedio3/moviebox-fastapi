@@ -15,7 +15,7 @@ async def health_check():
 async def root():
     return JSONResponse(content={
         "name": "MovieBox FastAPI Backend for Watchera",
-        "version": "8.0",
+        "version": "8.1",
         "endpoints": {
             "search":                  "/search?query=TITLE&original_language=en&limit=8",
             "get_download_links":      "/get_download_links?subject_id=ID&season=1&episode=1&page=1&limit=10",
@@ -32,7 +32,7 @@ async def root():
         },
         "rate_limits": {
             "search": "30/minute",
-            "get_download_links": "20/minute",
+            "get_download_links": "30/minute",
             "get_stream": "30/minute",
             "get_subtitles": "60/minute",
             "trending": "15/minute",
