@@ -6,3 +6,6 @@ venv/
 env/
 .env
 .DS_Store
+
+# local handover notes
+DUMMY_VIDEO_ISSUE_HANDOVER.md
